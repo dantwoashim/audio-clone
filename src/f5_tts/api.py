@@ -164,7 +164,7 @@ class F5TTS:
         seed=None,
     ):
         if seed is None:
-            seed = random.randint(0, sys.maxsize)
+            seed = random.randint(0, 2**32 - 1)
         seed_everything(seed)
         self.seed = seed
 

@@ -7,6 +7,8 @@ ckpts/
 wandb/
 results/
 .voice-studio/
+Voice/
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

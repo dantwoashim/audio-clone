@@ -61,6 +61,8 @@ The upgraded studio keeps the core cloning flow obvious while adding a real proj
 
 It is a good fit when you want to hand the app to non-technical users and avoid the denser demo layout.
 
+The Settings tab can also switch the studio over to a local finetune checkpoint, for example `ckpts/your_project/model_last.pt`. If you are testing a very early checkpoint, try turning off `Use EMA weights` before comparing it to the base model.
+
 There is also an API/server mode:
 
 ```bash

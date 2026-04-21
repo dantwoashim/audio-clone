@@ -473,10 +473,24 @@ def create_studio_app():
         bundle = service.export_asset_bundle(int(asset_id))
         return bundle, f"Export bundle created at {bundle}"
 
-    def save_settings(profile_name: str, asr_backend: str, idle_unload_seconds: int):
+    def detect_checkpoint():
+        detected = service.detect_latest_checkpoint()
+        if not detected:
+            return "", "No local finetune checkpoint was detected."
+        return detected, f"Detected latest checkpoint: {detected}"
+
+    def save_settings(
+        profile_name: str,
+        asr_backend: str,
+        idle_unload_seconds: int,
+        checkpoint_path: str,
+        use_ema: bool,
+    ):
         service.set_runtime_profile(profile_name)
         service.set_asr_backend(asr_backend)
         service.set_idle_unload_seconds(idle_unload_seconds)
+        service.set_checkpoint_path(checkpoint_path)
+        service.set_use_ema(use_ema)
         return json.dumps(service.system_profile(), indent=2), "Settings saved."
 
     def save_rule(project_id: int, source: str, replacement: str):
@@ -676,6 +690,14 @@ def create_studio_app():
                                 value=service.get_idle_unload_seconds(),
                                 precision=0,
                             )
+                            checkpoint_path = gr.Textbox(
+                                label="Inference checkpoint override",
+                                value=service.get_checkpoint_path(),
+                                lines=2,
+                                placeholder="Leave blank to use the shipped base model.",
+                            )
+                            use_ema = gr.Checkbox(label="Use EMA weights", value=service.get_use_ema())
+                            detect_checkpoint_btn = gr.Button("Detect latest local finetune", elem_classes=["studio-secondary"])
                             save_settings_btn = gr.Button("Save runtime settings", elem_classes=["studio-secondary"])
                             settings_status = gr.Textbox(label="Settings status", interactive=False)
                         with gr.Column(scale=7, elem_classes=["studio-panel"]):
@@ -968,8 +990,12 @@ def create_studio_app():
             export_btn.click(export_take, inputs=[export_take_choice], outputs=[export_file, export_status])
             save_settings_btn.click(
                 save_settings,
-                inputs=[profile_choice, asr_backend, idle_unload_seconds],
+                inputs=[profile_choice, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
                 outputs=[system_profile_settings, settings_status],
+            )
+            detect_checkpoint_btn.click(
+                detect_checkpoint,
+                outputs=[checkpoint_path, settings_status],
             )
             save_rule_btn.click(
                 save_rule,

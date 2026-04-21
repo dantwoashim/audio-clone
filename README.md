@@ -165,6 +165,13 @@ f5-tts_studio-server
 # Launch Voice Studio and expose it with a Cloudflare Quick Tunnel
 ./scripts/voice_studio_quick_tunnel.sh
 
+# Launch Voice Studio and expose it with zrok
+# First run needs a free token from https://myzrok.io
+ZROK_ENABLE_TOKEN=your_token ./scripts/voice_studio_zrok.sh
+
+# Optional: reserve a stable public name the first time
+ZROK_ENABLE_TOKEN=your_token ZROK_UNIQUE_NAME=your-name ./scripts/voice_studio_zrok.sh
+
 # Specify the port/host
 f5-tts_infer-gradio --port 7860 --host 0.0.0.0
 
@@ -178,6 +185,8 @@ Voice Studio Pro stores its local library outside the repo:
 - macOS cache: `~/Library/Caches/F5-TTS-Studio`
 
 That keeps project references, styles, takes, exports, and the local SQLite library portable without polluting the working tree.
+
+On Apple Silicon, the studio Settings tab can now point inference at a local finetune checkpoint such as `ckpts/<project>/model_last.pt` while keeping the base model as the fallback. If the checkpoint is very early in training, try turning off `Use EMA weights` in the same panel before judging the voice quality.
 
 <details>
 <summary>NVIDIA device docker compose file example</summary>

@@ -192,9 +192,11 @@ class StudioEngine:
         self.store = store
         self._lock = threading.Lock()
         self._engine: F5TTS | None = None
+        self._engine_signature: tuple[str, str, bool] | None = None
         self._silero_model = None
         self._last_used_at = 0.0
         self._timing_samples: list[float] = []
+        self._reference_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
     def device(self) -> str:
@@ -214,18 +216,35 @@ class StudioEngine:
     def is_loaded(self) -> bool:
         return self._engine is not None
 
-    def ensure_engine(self) -> F5TTS:
-        if self._engine is None:
+    def ensure_engine(self, ckpt_file: str | None = None, use_ema: bool = True) -> F5TTS:
+        signature = ("F5TTS_v1_Base", ckpt_file or "", bool(use_ema))
+        if self._engine is None or self._engine_signature != signature:
             with self._lock:
-                if self._engine is None:
+                if self._engine is None or self._engine_signature != signature:
                     from f5_tts.api import F5TTS
 
-                    self._engine = F5TTS(model="F5TTS_v1_Base")
+                    self._engine = F5TTS(model="F5TTS_v1_Base", ckpt_file=ckpt_file or "", use_ema=use_ema)
+                    self._engine_signature = signature
         self._touch()
         return self._engine
 
-    def warm_up(self) -> None:
-        self.ensure_engine().warm_up(show_info=lambda *_args, **_kwargs: None)
+    def prepare_reference(self, ref_file: str, ref_text: str) -> dict[str, Any]:
+        from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+
+        ref_audio, prepared_text = preprocess_ref_audio_text(ref_file, ref_text, show_info=lambda *_args, **_kwargs: None)
+        cache_key = (ref_audio, prepared_text)
+        if cache_key not in self._reference_cache:
+            audio, sample_rate = torchaudio.load(ref_audio)
+            self._reference_cache[cache_key] = {
+                "ref_audio": ref_audio,
+                "ref_text": prepared_text,
+                "audio": audio,
+                "sample_rate": sample_rate,
+            }
+        return self._reference_cache[cache_key]
+
+    def warm_up(self, ckpt_file: str | None = None, use_ema: bool = True) -> None:
+        self.ensure_engine(ckpt_file=ckpt_file, use_ema=use_ema).warm_up(show_info=lambda *_args, **_kwargs: None)
         self._touch()
 
     def maybe_unload(self, idle_unload_seconds: int, force: bool = False) -> None:
@@ -235,6 +254,7 @@ class StudioEngine:
             return
         with self._lock:
             self._engine = None
+            self._engine_signature = None
         release_memory()
 
     def _load_silero(self):
@@ -288,7 +308,10 @@ class StudioEngine:
             except Exception:
                 chosen_backend = "transformers"
 
-        transcript = self.ensure_engine().transcribe(audio_path, language=language)
+        from f5_tts.infer.utils_infer import transcribe as infer_transcribe
+
+        transcript = infer_transcribe(audio_path, language=language)
+        self._touch()
         return transcript, "transformers"
 
     def analyze_reference(self, audio_path: str, transcript: str = "", backend: str = DEFAULT_ASR_BACKEND) -> ReferenceAnalysis:
@@ -426,10 +449,9 @@ class StudioEngine:
         engine_loaded: bool,
         queue_depth: int,
     ) -> GenerationEstimate:
-        prepared = self.ensure_engine().prepare_reference(
+        prepared = self.prepare_reference(
             reference_audio_path,
             ref_text,
-            show_info=lambda *_args, **_kwargs: None,
         )
         audio = prepared["audio"]
         sample_rate = prepared["sample_rate"]
@@ -519,12 +541,13 @@ class StudioEngine:
         style: dict | None,
         pronunciation_rules: list[dict],
         output_dir: Path,
+        ckpt_file: str | None = None,
+        use_ema: bool = True,
     ) -> dict:
-        engine = self.ensure_engine()
-        prepared = engine.prepare_reference(
+        engine = self.ensure_engine(ckpt_file=ckpt_file, use_ema=use_ema)
+        prepared = self.prepare_reference(
             reference["audio_path"],
             reference["transcript"],
-            show_info=lambda *_args, **_kwargs: None,
         )
         profile_name = self.store.get_setting("runtime_profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
         render_text, speed, fix_duration, nfe_step, remove_silence, render_spectrogram, style_notes = self._resolve_render_targets(
@@ -602,6 +625,73 @@ class StudioService:
         os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.0")
         os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.9")
 
+    def _search_checkpoint_roots(self) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def register(root: Path) -> None:
+            try:
+                resolved = root.resolve()
+            except FileNotFoundError:
+                resolved = root
+            key = str(resolved)
+            if key not in seen and (resolved / "ckpts").exists():
+                seen.add(key)
+                candidates.append(resolved)
+
+        env_root = os.environ.get("F5_TTS_REPO_ROOT")
+        if env_root:
+            register(Path(env_root))
+
+        for origin in (Path.cwd(), Path(__file__).resolve().parent):
+            for parent in [origin, *origin.parents]:
+                register(parent)
+
+        return candidates
+
+    def detect_latest_checkpoint(self) -> str:
+        matches: list[Path] = []
+        for root in self._search_checkpoint_roots():
+            ckpt_root = root / "ckpts"
+            for pattern in ("*/model_last.pt", "*/model_last.safetensors", "*/model_*.pt", "*/model_*.safetensors"):
+                matches.extend(ckpt_root.glob(pattern))
+
+        filtered = [path for path in matches if path.is_file() and not path.name.startswith("pretrained_")]
+        if not filtered:
+            return ""
+        filtered.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return str(filtered[0])
+
+    def get_checkpoint_path(self) -> str:
+        saved = (self.store.get_setting("checkpoint_path", "") or "").strip()
+        if not saved:
+            return ""
+        return saved if Path(saved).exists() else ""
+
+    def set_checkpoint_path(self, checkpoint_path: str) -> str:
+        normalized = checkpoint_path.strip()
+        if normalized:
+            path = Path(normalized).expanduser()
+            if not path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {path}")
+            normalized = str(path.resolve())
+        self.store.set_setting("checkpoint_path", normalized)
+        self.engine.maybe_unload(0, force=True)
+        return normalized
+
+    def get_use_ema(self) -> bool:
+        return (self.store.get_setting("use_ema", "true") or "true").lower() != "false"
+
+    def set_use_ema(self, value: bool) -> None:
+        self.store.set_setting("use_ema", "true" if value else "false")
+        self.engine.maybe_unload(0, force=True)
+
+    def _engine_options(self) -> dict[str, Any]:
+        return {
+            "ckpt_file": self.get_checkpoint_path() or None,
+            "use_ema": self.get_use_ema(),
+        }
+
     def get_runtime_profile_name(self) -> str:
         return self.store.get_setting("runtime_profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
 
@@ -637,7 +727,7 @@ class StudioService:
 
         def worker():
             try:
-                self.engine.warm_up()
+                self.engine.warm_up(**self._engine_options())
             except Exception:
                 pass
 
@@ -757,6 +847,7 @@ class StudioService:
             style,
             pronunciation_rules,
             output_dir=self._job_output_dir(project),
+            **self._engine_options(),
         )
         asset = self.store.save_audio_asset(
             project_id=request.project_id,
@@ -882,6 +973,7 @@ class StudioService:
     def system_profile(self) -> dict:
         profile_name = self.get_runtime_profile_name()
         profile = get_runtime_profile(profile_name)
+        checkpoint_path = self.get_checkpoint_path()
         return SystemProfileView(
             profile=profile_name,
             profile_label=profile.label,
@@ -895,6 +987,9 @@ class StudioService:
             idle_unload_seconds=self.get_idle_unload_seconds(),
             root_path=str(self.paths.root),
             cache_path=str(self.paths.cache),
+            model_name="F5TTS_v1_Base",
+            checkpoint_path=checkpoint_path or None,
+            use_ema=self.get_use_ema(),
         ).model_dump()
 
     def stage_upload(self, source_path: str) -> str:

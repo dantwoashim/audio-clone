@@ -263,6 +263,14 @@ class Trainer:
         return update
 
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
+        env_num_workers = os.getenv("F5_TTS_NUM_WORKERS")
+        if env_num_workers is not None:
+            num_workers = max(0, int(env_num_workers))
+        else:
+            # Keep worker counts modest on shared/local machines like Apple Silicon laptops.
+            cpu_count = os.cpu_count() or 1
+            num_workers = min(num_workers, max(0, min(8, cpu_count // 2)))
+
         if self.log_samples:
             from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
 
@@ -279,13 +287,17 @@ class Trainer:
         else:
             generator = None
 
+        device_type = getattr(self.accelerator.device, "type", str(self.accelerator.device))
+        pin_memory = device_type in {"cuda", "xpu"}
+        persistent_workers = num_workers > 0
+
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
                 train_dataset,
                 collate_fn=collate_fn,
                 num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
                 batch_size=self.batch_size_per_gpu,
                 shuffle=True,
                 generator=generator,
@@ -304,8 +316,8 @@ class Trainer:
                 train_dataset,
                 collate_fn=collate_fn,
                 num_workers=num_workers,
-                pin_memory=True,
-                persistent_workers=True,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
                 batch_sampler=batch_sampler,
             )
         else:

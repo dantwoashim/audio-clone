@@ -54,14 +54,16 @@ start_app_if_needed() {
     return
   fi
 
-  if [[ ! -x "${ROOT_DIR}/.venv/bin/f5-tts_voice-studio" ]]; then
-    echo "Missing ${ROOT_DIR}/.venv/bin/f5-tts_voice-studio" >&2
-    echo "Install the project first with: .venv/bin/python -m pip install -e ." >&2
+  if [[ ! -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    echo "Missing ${ROOT_DIR}/.venv/bin/python" >&2
     exit 1
   fi
 
   echo "Starting Voice Studio on http://${APP_HOST}:${APP_PORT} ..."
-  nohup "${ROOT_DIR}/.venv/bin/f5-tts_voice-studio" --host "${APP_HOST}" --port "${APP_PORT}" >"${APP_LOG}" 2>&1 &
+  nohup env PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    F5_TTS_REPO_ROOT="${ROOT_DIR}" \
+    "${ROOT_DIR}/.venv/bin/python" -m f5_tts.infer.voice_studio --host "${APP_HOST}" --port "${APP_PORT}" \
+    >"${APP_LOG}" 2>&1 &
   echo $! >"${APP_PID_FILE}"
   wait_for_http
 }

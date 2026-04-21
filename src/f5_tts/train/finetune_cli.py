@@ -71,6 +71,11 @@ def parse_args():
         action="store_true",
         help="Use 8-bit Adam optimizer from bitsandbytes",
     )
+    parser.add_argument(
+        "--checkpoint_activations",
+        action="store_true",
+        help="Use activation checkpointing to reduce memory pressure during finetuning.",
+    )
 
     return parser.parse_args()
 
@@ -95,6 +100,7 @@ def main():
             ff_mult=2,
             text_dim=512,
             conv_layers=4,
+            checkpoint_activations=args.checkpoint_activations,
         )
         if args.finetune:
             if args.pretrain is None:
@@ -114,6 +120,7 @@ def main():
             text_mask_padding=False,
             conv_layers=4,
             pe_attn_head=1,
+            checkpoint_activations=args.checkpoint_activations,
         )
         if args.finetune:
             if args.pretrain is None:

@@ -143,6 +143,9 @@ class SystemProfileView(BaseModel):
     profile: str
     profile_label: str
     description: str
+    model_name: str
+    checkpoint_path: str | None = None
+    use_ema: bool = True
     engine_loaded: bool
     asr_backend: str
     device: str
