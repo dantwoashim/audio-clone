@@ -24,7 +24,7 @@ Currently supported features:
 - Basic TTS with Chunk Inference
 - Multi-Style / Multi-Speaker Generation
 - Voice Chat powered by Qwen2.5-3B-Instruct
-- Voice Studio, a streamlined voice-cloning UI focused on the main sample -> script -> output workflow
+- Voice Studio Pro, a local-first voice-cloning studio with projects, reusable references and style prompts, A/B take comparison, pronunciation rules, batch jobs, and export bundles
 - [Custom inference with more language support](SHARED.md)
 
 The cli command `f5-tts_infer-gradio` equals to `python src/f5_tts/infer/infer_gradio.py`, which launches a Gradio APP (web interface) for inference.
@@ -50,14 +50,33 @@ For a more guided interface focused on voice cloning and simple script generatio
 f5-tts_voice-studio
 ```
 
-This app keeps the flow intentionally narrow:
+The upgraded studio keeps the core cloning flow obvious while adding a real project layer:
 
-- upload or record a reference clip
-- inspect or correct the transcript
-- paste a script
-- generate the cloned voice with a smaller set of quality controls
+- create or select a project
+- save reference voices with local analysis and transcript confirmation
+- save style prompts for pacing and delivery reuse
+- run quick previews or final renders
+- queue batches one job at a time for shared-device safety
+- compare takes and export share bundles
 
 It is a good fit when you want to hand the app to non-technical users and avoid the denser demo layout.
+
+There is also an API/server mode:
+
+```bash
+f5-tts_studio-server
+```
+
+That serves:
+
+- studio UI at `/app`
+- local REST API at `/api/v1`
+- docs at `/docs`
+
+On macOS the studio stores its durable data in:
+
+- `~/Library/Application Support/F5-TTS-Studio`
+- `~/Library/Caches/F5-TTS-Studio`
 
 Could also be used as a component for larger application:
 ```python

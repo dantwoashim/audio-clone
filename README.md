@@ -102,6 +102,12 @@ conda install ffmpeg
 > # git submodule update --init --recursive  # (optional, if use bigvgan as vocoder)
 > pip install -e .
 > ```
+>
+> ### 3. Apple-Silicon helper extras (optional, recommended for the upgraded studio)
+>
+> ```bash
+> pip install -e .[apple_audio]
+> ```
 
 ### Docker usage also available
 ```bash
@@ -143,7 +149,7 @@ Currently supported features:
 - Basic TTS with Chunk Inference
 - Multi-Style / Multi-Speaker Generation
 - Voice Chat powered by Qwen2.5-3B-Instruct
-- Voice Studio for a simpler voice-cloning workflow
+- Voice Studio Pro for a local-first voice-cloning workflow with projects, saved references, saved style prompts, queue-backed batch jobs, A/B compare, pronunciation rules, export bundles, and an optional FastAPI server
 - [Custom inference with more language support](src/f5_tts/infer/SHARED.md)
 
 ```bash
@@ -152,6 +158,9 @@ f5-tts_infer-gradio
 
 # Launch the streamlined Voice Studio app
 f5-tts_voice-studio
+
+# Launch the FastAPI server and mount the studio under /app with API routes under /api/v1
+f5-tts_studio-server
 
 # Launch Voice Studio and expose it with a Cloudflare Quick Tunnel
 ./scripts/voice_studio_quick_tunnel.sh
@@ -162,6 +171,13 @@ f5-tts_infer-gradio --port 7860 --host 0.0.0.0
 # Launch a share link
 f5-tts_infer-gradio --share
 ```
+
+Voice Studio Pro stores its local library outside the repo:
+
+- macOS support data: `~/Library/Application Support/F5-TTS-Studio`
+- macOS cache: `~/Library/Caches/F5-TTS-Studio`
+
+That keeps project references, styles, takes, exports, and the local SQLite library portable without polluting the working tree.
 
 <details>
 <summary>NVIDIA device docker compose file example</summary>
@@ -236,6 +252,12 @@ Use pre-commit to ensure code quality (will run linters and formatters automatic
 ```bash
 pip install pre-commit
 pre-commit install
+```
+
+For the new studio tests:
+
+```bash
+python -m unittest discover -s testsuite
 ```
 
 When making a pull request, before each commit, run: 

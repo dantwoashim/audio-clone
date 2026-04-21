@@ -2,6 +2,13 @@
 requires = ["setuptools >= 61.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["f5_tts*"]
+
 [project]
 name = "f5-tts"
 version = "1.1.20"
@@ -20,6 +27,7 @@ dependencies = [
     "click",
     "datasets",
     "ema_pytorch>=0.5.2",
+    "fastapi>=0.115.0",
     "gradio>=6.0.0,<6.11",
     "hydra-core>=1.3.0",
     "librosa",
@@ -39,12 +47,21 @@ dependencies = [
     "transformers",
     "transformers_stream_generator",
     "unidecode",
+    "uvicorn>=0.30.0",
     "vocos",
     "wandb",
     "x_transformers>=1.31.14",
 ]
 
 [project.optional-dependencies]
+apple_audio = [
+    "mlx-whisper>=0.2.0",
+    "silero-vad>=5.1.2",
+]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.3.0",
+]
 eval = [
     "faster_whisper==0.10.1",
     "funasr",
@@ -61,5 +78,6 @@ Homepage = "https://github.com/SWivid/F5-TTS"
 "f5-tts_infer-cli" = "f5_tts.infer.infer_cli:main"
 "f5-tts_infer-gradio" = "f5_tts.infer.infer_gradio:main"
 "f5-tts_voice-studio" = "f5_tts.infer.voice_studio:main"
+"f5-tts_studio-server" = "f5_tts.studio.server:main"
 "f5-tts_finetune-cli" = "f5_tts.train.finetune_cli:main"
 "f5-tts_finetune-gradio" = "f5_tts.train.finetune_gradio:main"

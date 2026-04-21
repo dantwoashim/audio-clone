@@ -1,0 +1,921 @@
+from __future__ import annotations
+
+import gc
+import html
+import json
+import os
+import queue
+import re
+import shutil
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import soundfile as sf
+import torch
+import torchaudio
+
+from f5_tts.studio.paths import StudioPaths, get_studio_paths
+from f5_tts.studio.profiles import DEFAULT_PROFILE, PROFILE_MAP, get_runtime_profile
+from f5_tts.studio.schemas import GenerationEstimate, GenerationRequest, ReferenceAnalysis, StyleAnalysis, SystemProfileView
+from f5_tts.studio.storage import StudioStore
+
+if TYPE_CHECKING:
+    from f5_tts.api import F5TTS
+
+
+DEFAULT_ASR_BACKEND = "auto"
+
+CONTEXT_MODIFIERS = {
+    "slow": {"speed": 0.9, "duration": 1.12},
+    "calm": {"speed": 0.93, "duration": 1.08},
+    "gentle": {"speed": 0.94, "duration": 1.08},
+    "soft": {"speed": 0.95, "duration": 1.05},
+    "whisper": {"speed": 0.92, "duration": 1.10},
+    "fast": {"speed": 1.08, "duration": 0.92},
+    "urgent": {"speed": 1.12, "duration": 0.90},
+    "energetic": {"speed": 1.08, "duration": 0.94},
+    "excited": {"speed": 1.06, "duration": 0.95},
+    "dramatic": {"speed": 0.95, "duration": 1.12},
+    "cinematic": {"speed": 0.96, "duration": 1.10},
+    "narrator": {"speed": 0.95, "duration": 1.08},
+}
+
+tempfile_kwargs = {"delete_on_close": False} if sys.version_info >= (3, 12) else {"delete": False}
+target_sample_rate = 24000
+hop_length = 256
+
+_SMALL_NUMBERS = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    minutes, remainder = divmod(seconds, 60)
+    hours, minutes = divmod(int(minutes), 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{remainder:05.2f}"
+    return f"{minutes:02d}:{remainder:05.2f}"
+
+
+def chunk_text(text: str, max_chars: int = 135) -> list[str]:
+    chunks = []
+    current_chunk = ""
+    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+    for sentence in sentences:
+        if not sentence:
+            continue
+        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
+
+def number_to_words(value: int) -> str:
+    if value < 20:
+        return _SMALL_NUMBERS[value]
+    if value < 100:
+        tens, remainder = divmod(value, 10)
+        return _TENS[tens] if remainder == 0 else f"{_TENS[tens]} {_SMALL_NUMBERS[remainder]}"
+    if value < 1000:
+        hundreds, remainder = divmod(value, 100)
+        prefix = f"{_SMALL_NUMBERS[hundreds]} hundred"
+        return prefix if remainder == 0 else f"{prefix} {number_to_words(remainder)}"
+    if value < 10000:
+        thousands, remainder = divmod(value, 1000)
+        prefix = f"{_SMALL_NUMBERS[thousands]} thousand"
+        return prefix if remainder == 0 else f"{prefix} {number_to_words(remainder)}"
+    return str(value)
+
+
+def normalize_script(text: str, pronunciation_rules: list[dict]) -> str:
+    text = text.strip()
+    if not text:
+        return text
+
+    for rule in pronunciation_rules:
+        pattern = re.compile(rf"\b{re.escape(rule['source'])}\b", flags=re.IGNORECASE)
+        text = pattern.sub(rule["replacement"], text)
+
+    def replace_time(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if minute == 0:
+            return f"{number_to_words(hour)} o'clock"
+        return f"{number_to_words(hour)} {number_to_words(minute)}"
+
+    def replace_number(match: re.Match[str]) -> str:
+        value = int(match.group(0))
+        if value > 9999:
+            return match.group(0)
+        return number_to_words(value)
+
+    text = re.sub(r"\b(\d{1,2}):(\d{2})\b", replace_time, text)
+    text = re.sub(r"\b\d{1,4}\b", replace_number, text)
+    text = re.sub(r"([,.;!?])(?=\S)", r"\1 ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def apply_context_modifiers(base_speed: float, base_duration: float | None, context_notes: str) -> tuple[float, float | None, list[str]]:
+    if not context_notes.strip():
+        return base_speed, base_duration, []
+
+    speed = base_speed
+    duration = base_duration
+    matched: list[str] = []
+    lowered = context_notes.lower()
+    for keyword, modifier in CONTEXT_MODIFIERS.items():
+        if keyword in lowered:
+            speed *= modifier["speed"]
+            if duration is not None:
+                duration *= modifier["duration"]
+            matched.append(keyword)
+
+    speed = min(max(speed, 0.6), 1.5)
+    if duration is not None:
+        duration = max(duration, 0.5)
+    return speed, duration, matched
+
+
+def release_memory() -> None:
+    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+    try:
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
+    except Exception:
+        pass
+
+
+class StudioEngine:
+    def __init__(self, store: StudioStore):
+        self.store = store
+        self._lock = threading.Lock()
+        self._engine: F5TTS | None = None
+        self._silero_model = None
+        self._last_used_at = 0.0
+        self._timing_samples: list[float] = []
+
+    @property
+    def device(self) -> str:
+        if self._engine is not None:
+            return str(self._engine.device)
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return "xpu"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    def _touch(self) -> None:
+        self._last_used_at = time.time()
+
+    def is_loaded(self) -> bool:
+        return self._engine is not None
+
+    def ensure_engine(self) -> F5TTS:
+        if self._engine is None:
+            with self._lock:
+                if self._engine is None:
+                    from f5_tts.api import F5TTS
+
+                    self._engine = F5TTS(model="F5TTS_v1_Base")
+        self._touch()
+        return self._engine
+
+    def warm_up(self) -> None:
+        self.ensure_engine().warm_up(show_info=lambda *_args, **_kwargs: None)
+        self._touch()
+
+    def maybe_unload(self, idle_unload_seconds: int, force: bool = False) -> None:
+        if self._engine is None:
+            return
+        if not force and idle_unload_seconds > 0 and (time.time() - self._last_used_at) < idle_unload_seconds:
+            return
+        with self._lock:
+            self._engine = None
+        release_memory()
+
+    def _load_silero(self):
+        if self._silero_model is not None:
+            return self._silero_model
+        try:
+            from silero_vad import load_silero_vad
+        except ImportError:
+            return None
+        self._silero_model = load_silero_vad()
+        return self._silero_model
+
+    def _speech_metrics(self, audio_path: str, mono_audio: torch.Tensor, sample_rate: int) -> tuple[float | None, float | None]:
+        model = self._load_silero()
+        if model is None:
+            return None, None
+
+        try:
+            from silero_vad import get_speech_timestamps, read_audio
+        except ImportError:
+            return None, None
+
+        try:
+            vad_audio = read_audio(audio_path)
+            timestamps = get_speech_timestamps(vad_audio, model, return_seconds=True)
+        except Exception:
+            return None, None
+
+        speech_seconds = sum(segment["end"] - segment["start"] for segment in timestamps)
+        duration = mono_audio.shape[-1] / sample_rate
+        speech_ratio = 0.0 if duration == 0 else min(max(speech_seconds / duration, 0.0), 1.0)
+        return speech_seconds, speech_ratio
+
+    def transcribe_audio(self, audio_path: str, language: str | None = None, backend: str = DEFAULT_ASR_BACKEND) -> tuple[str, str]:
+        chosen_backend = backend
+        if backend == "auto":
+            chosen_backend = "mlx_whisper" if self.device.startswith("mps") else "transformers"
+
+        if chosen_backend == "mlx_whisper":
+            try:
+                import mlx_whisper
+
+                result = mlx_whisper.transcribe(
+                    audio_path,
+                    path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                    language=language,
+                    word_timestamps=False,
+                )
+                self._touch()
+                return result["text"].strip(), "mlx_whisper"
+            except Exception:
+                chosen_backend = "transformers"
+
+        transcript = self.ensure_engine().transcribe(audio_path, language=language)
+        return transcript, "transformers"
+
+    def analyze_reference(self, audio_path: str, transcript: str = "", backend: str = DEFAULT_ASR_BACKEND) -> ReferenceAnalysis:
+        audio, sample_rate = torchaudio.load(audio_path)
+        mono_audio = audio.mean(dim=0).float()
+        duration_seconds = mono_audio.shape[-1] / sample_rate
+        rms = float(torch.sqrt(torch.mean(mono_audio.square())).item()) if mono_audio.numel() else 0.0
+        peak = float(mono_audio.abs().max().item()) if mono_audio.numel() else 0.0
+
+        window = max(sample_rate // 20, 1)
+        unfolded = mono_audio.abs().unfold(0, window, window) if mono_audio.shape[-1] >= window else mono_audio.abs().unsqueeze(0)
+        energies = unfolded.mean(dim=-1)
+        silence_threshold = max(rms * 0.35, 0.01)
+        trailing_silence_seconds = 0.0
+        for value in reversed(energies.tolist()):
+            if value > silence_threshold:
+                break
+            trailing_silence_seconds += window / sample_rate
+
+        speech_seconds, speech_ratio = self._speech_metrics(audio_path, mono_audio, sample_rate)
+        transcript_text = transcript.strip()
+        used_backend = "manual"
+        if not transcript_text:
+            transcript_text, used_backend = self.transcribe_audio(audio_path, backend=backend)
+
+        warnings: list[str] = []
+        notes: list[str] = [
+            f"Sample length: {format_duration(duration_seconds)}",
+            f"Trailing silence: {format_duration(trailing_silence_seconds)}",
+        ]
+        if duration_seconds < 4:
+            warnings.append("Reference is shorter than 4 seconds. Cloning may sound unstable.")
+        elif duration_seconds < 6:
+            warnings.append("Reference is usable, but 6 to 12 seconds usually gives more reliable identity.")
+        if duration_seconds > 14:
+            warnings.append("Reference is longer than 14 seconds. Trim closer to 12 seconds for faster and safer inference.")
+        if peak > 0.98:
+            warnings.append("Reference may be clipping. A cleaner take should improve naturalness.")
+        if rms < 0.015:
+            warnings.append("Reference level is quite low. Louder, clearer speech should transcribe more reliably.")
+        if trailing_silence_seconds < 0.25:
+            warnings.append("Add a little clean silence at the end of the sample to reduce truncation risk.")
+        if speech_ratio is not None and speech_ratio < 0.55:
+            warnings.append("The clip contains limited detected speech relative to its duration.")
+
+        return ReferenceAnalysis(
+            transcript=transcript_text,
+            duration_seconds=duration_seconds,
+            sample_rate=sample_rate,
+            channels=audio.shape[0],
+            rms=rms,
+            peak=peak,
+            trailing_silence_seconds=trailing_silence_seconds,
+            speech_seconds=speech_seconds,
+            speech_ratio=speech_ratio,
+            backend=used_backend,
+            warnings=warnings,
+            notes=notes,
+        )
+
+    def analyze_style(
+        self,
+        style_audio_path: str,
+        style_text: str,
+        context_notes: str,
+        gen_text: str = "",
+        backend: str = DEFAULT_ASR_BACKEND,
+    ) -> StyleAnalysis:
+        transcript = style_text.strip()
+        if not transcript:
+            transcript, _ = self.transcribe_audio(style_audio_path, backend=backend)
+
+        audio, sample_rate = torchaudio.load(style_audio_path)
+        duration_seconds = audio.shape[-1] / sample_rate
+        style_text_len = max(len(transcript.encode("utf-8")), 1)
+        style_rate = style_text_len / max(duration_seconds, 0.1)
+        recommended_speed = min(max(style_rate / 12.5, 0.72), 1.28)
+        suggested_fix_duration = None
+        if gen_text.strip():
+            target_text_len = max(len(gen_text.encode("utf-8")), 1)
+            suggested_fix_duration = duration_seconds * (target_text_len / style_text_len)
+
+        recommended_speed, suggested_fix_duration, matched = apply_context_modifiers(
+            recommended_speed,
+            suggested_fix_duration,
+            context_notes,
+        )
+        notes = [
+            f"Style prompt length: {format_duration(duration_seconds)}",
+            f"Recommended speed: {recommended_speed:.2f}",
+        ]
+        if suggested_fix_duration is not None:
+            notes.append(f"Suggested generated speech target: {format_duration(suggested_fix_duration)}")
+        if matched:
+            notes.append(f"Context matched: {', '.join(matched)}")
+
+        return StyleAnalysis(
+            transcript=transcript,
+            duration_seconds=duration_seconds,
+            recommended_speed=recommended_speed,
+            suggested_fix_duration=suggested_fix_duration,
+            matched_keywords=matched,
+            notes=notes,
+        )
+
+    def default_normalized_rtf(self) -> float:
+        device = self.device
+        if device.startswith("mps"):
+            return 1.15
+        if device.startswith("cuda"):
+            return 0.22
+        if device.startswith("xpu"):
+            return 0.75
+        return 2.4
+
+    def normalized_rtf(self) -> float:
+        if self._timing_samples:
+            return sum(self._timing_samples) / len(self._timing_samples)
+        return self.default_normalized_rtf()
+
+    def _record_runtime(self, elapsed_seconds: float, runtime_seconds: float, nfe_step: int) -> None:
+        if runtime_seconds <= 0:
+            return
+        normalized = (elapsed_seconds / runtime_seconds) * (32 / max(nfe_step, 1))
+        self._timing_samples.append(normalized)
+        self._timing_samples[:] = self._timing_samples[-6:]
+
+    def estimate_generation(
+        self,
+        reference_audio_path: str,
+        ref_text: str,
+        text: str,
+        speed: float,
+        nfe_step: int,
+        engine_loaded: bool,
+        queue_depth: int,
+    ) -> GenerationEstimate:
+        prepared = self.ensure_engine().prepare_reference(
+            reference_audio_path,
+            ref_text,
+            show_info=lambda *_args, **_kwargs: None,
+        )
+        audio = prepared["audio"]
+        sample_rate = prepared["sample_rate"]
+        duration_seconds = audio.shape[-1] / sample_rate
+        ref_audio_len = int(duration_seconds * target_sample_rate / hop_length)
+        ref_text_len = max(len(prepared["ref_text"].encode("utf-8")), 1)
+        max_chars = int(ref_text_len / max(duration_seconds, 0.1) * (22 - duration_seconds) * speed)
+        max_chars = max(max_chars, 60)
+        text_batches = chunk_text(text, max_chars=max_chars)
+
+        predicted_output_seconds = 0.0
+        for chunk in text_batches:
+            local_speed = speed if len(chunk.encode("utf-8")) >= 10 else min(speed, 0.3)
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * len(chunk.encode("utf-8")) / local_speed)
+            frames = max(duration - ref_audio_len, 0)
+            predicted_output_seconds += frames * hop_length / target_sample_rate
+
+        compute_seconds = predicted_output_seconds * self.normalized_rtf() * (nfe_step / 32)
+        cold_start_penalty = 0.0 if engine_loaded else 2.5
+        total_seconds = compute_seconds + cold_start_penalty + max(len(text_batches) - 1, 0) * 0.12 + queue_depth * 0.4
+        confidence = "calibrated from recent local runs" if self._timing_samples else "first-run estimate"
+        return GenerationEstimate(
+            estimated_generation_seconds=total_seconds,
+            predicted_output_seconds=predicted_output_seconds,
+            chunks=len(text_batches),
+            effective_speed=speed,
+            queue_depth=queue_depth,
+            confidence=confidence,
+        )
+
+    def _resolve_render_targets(
+        self,
+        request: GenerationRequest,
+        reference: dict,
+        style: dict | None,
+        pronunciation_rules: list[dict],
+        profile_name: str,
+    ):
+        profile = get_runtime_profile(profile_name)
+        if request.mode == "preview":
+            preview_nfe = profile.preview_nfe_step
+        else:
+            preview_nfe = profile.final_nfe_step
+
+        normalized_text = normalize_script(request.text, pronunciation_rules)
+        speed = request.speed if request.speed is not None else 1.0
+        fix_duration = None
+        style_notes: list[str] = []
+
+        if style and request.use_style_prompt:
+            analysis = style["analysis"]
+            style_duration = float(analysis.get("duration_seconds", 0.0) or 0.0)
+            style_text = style["transcript"] or analysis.get("transcript", "")
+            if request.speed is None:
+                speed = float(analysis.get("recommended_speed", speed))
+            suggested_fix_duration = None
+            if style_duration > 0 and style_text:
+                target_text_len = max(len(normalized_text.encode("utf-8")), 1)
+                style_text_len = max(len(style_text.encode("utf-8")), 1)
+                ref_audio, ref_sr = torchaudio.load(reference["audio_path"])
+                ref_duration = ref_audio.shape[-1] / ref_sr
+                suggested_fix_duration = ref_duration + style_duration * (target_text_len / style_text_len)
+            speed, fix_duration, matched = apply_context_modifiers(speed, suggested_fix_duration, request.context_notes)
+            if matched:
+                style_notes.append(f"Applied style context: {', '.join(matched)}")
+
+        if request.mode == "preview":
+            normalized_text = chunk_text(
+                normalized_text,
+                max_chars=profile.preview_char_limit,
+            )[0]
+
+        nfe_step = request.nfe_step
+        if nfe_step is None:
+            nfe_step = preview_nfe
+        remove_silence = profile.trim_silence_default if request.remove_silence is None else request.remove_silence
+        render_spectrogram = (
+            profile.render_spectrogram_default if request.render_spectrogram is None else request.render_spectrogram
+        )
+
+        return normalized_text, speed, fix_duration, nfe_step, remove_silence, render_spectrogram, style_notes
+
+    def render(
+        self,
+        request: GenerationRequest,
+        reference: dict,
+        style: dict | None,
+        pronunciation_rules: list[dict],
+        output_dir: Path,
+    ) -> dict:
+        engine = self.ensure_engine()
+        prepared = engine.prepare_reference(
+            reference["audio_path"],
+            reference["transcript"],
+            show_info=lambda *_args, **_kwargs: None,
+        )
+        profile_name = self.store.get_setting("runtime_profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
+        render_text, speed, fix_duration, nfe_step, remove_silence, render_spectrogram, style_notes = self._resolve_render_targets(
+            request,
+            reference,
+            style,
+            pronunciation_rules,
+            profile_name,
+        )
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename_stem = re.sub(r"[^a-z0-9]+", "-", request.name.lower()).strip("-") or "render"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        wav_path = output_dir / f"{timestamp}-{filename_stem}-{request.mode}.wav"
+        spec_path = output_dir / f"{timestamp}-{filename_stem}-{request.mode}.png"
+
+        started_at = time.perf_counter()
+        wav, sample_rate, spec = engine.infer_prepared(
+            prepared,
+            gen_text=render_text,
+            speed=speed,
+            nfe_step=nfe_step,
+            cross_fade_duration=request.cross_fade_duration,
+            cfg_strength=request.cfg_strength,
+            sway_sampling_coef=request.sway_sampling_coef,
+            progress=None,
+            remove_silence=False,
+            fix_duration=fix_duration,
+        )
+        elapsed_seconds = time.perf_counter() - started_at
+
+        sf.write(wav_path, wav, sample_rate)
+        if remove_silence:
+            from f5_tts.infer.utils_infer import remove_silence_for_generated_wav
+
+            remove_silence_for_generated_wav(str(wav_path))
+            trimmed, _ = torchaudio.load(str(wav_path))
+            wav = trimmed.squeeze().cpu().numpy()
+        if render_spectrogram and spec is not None:
+            from f5_tts.infer.utils_infer import save_spectrogram
+
+            save_spectrogram(spec, str(spec_path))
+        else:
+            spec_path = None
+
+        runtime_seconds = len(wav) / sample_rate if len(wav) else 0.0
+        self._record_runtime(elapsed_seconds, runtime_seconds, nfe_step)
+        self._touch()
+        return {
+            "audio_path": str(wav_path),
+            "spectrogram_path": str(spec_path) if spec_path is not None else None,
+            "duration_seconds": runtime_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "sample_rate": sample_rate,
+            "text_excerpt": render_text[:240],
+            "effective_speed": speed,
+            "nfe_step": nfe_step,
+            "style_notes": style_notes,
+        }
+
+
+class StudioService:
+    def __init__(self, paths: StudioPaths | None = None):
+        self.paths = paths or get_studio_paths()
+        self.store = StudioStore(self.paths)
+        self.store.ensure_default_project()
+        self.engine = StudioEngine(self.store)
+        self._job_queue: queue.Queue[int] = queue.Queue()
+        self._cancelled_jobs: set[int] = set()
+        self._current_job_id: int | None = None
+        self._worker_lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._warm_thread: threading.Thread | None = None
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.0")
+        os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.9")
+
+    def get_runtime_profile_name(self) -> str:
+        return self.store.get_setting("runtime_profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
+
+    def set_runtime_profile(self, value: str) -> None:
+        profile = value if value in PROFILE_MAP else DEFAULT_PROFILE
+        self.store.set_setting("runtime_profile", profile)
+        if not get_runtime_profile(profile).warm_on_start:
+            self.engine.maybe_unload(0, force=True)
+
+    def get_asr_backend(self) -> str:
+        return self.store.get_setting("asr_backend", DEFAULT_ASR_BACKEND) or DEFAULT_ASR_BACKEND
+
+    def set_asr_backend(self, backend: str) -> None:
+        self.store.set_setting("asr_backend", backend)
+
+    def get_idle_unload_seconds(self) -> int:
+        saved = self.store.get_setting("idle_unload_seconds")
+        if saved is not None:
+            return int(saved)
+        return get_runtime_profile(self.get_runtime_profile_name()).idle_unload_seconds
+
+    def set_idle_unload_seconds(self, seconds: int) -> None:
+        self.store.set_setting("idle_unload_seconds", str(max(seconds, 0)))
+
+    def warm_profile_if_needed(self) -> str:
+        profile = get_runtime_profile(self.get_runtime_profile_name())
+        if not profile.warm_on_start:
+            return "Warm-up skipped in the current runtime profile."
+        if self.engine.is_loaded():
+            return "Voice engine is already warm."
+        if self._warm_thread and self._warm_thread.is_alive():
+            return "Voice engine warm-up is already in progress."
+
+        def worker():
+            try:
+                self.engine.warm_up()
+            except Exception:
+                pass
+
+        self._warm_thread = threading.Thread(target=worker, daemon=True)
+        self._warm_thread.start()
+        return "Voice engine warm-up started in the background."
+
+    def maybe_unload_idle_engine(self) -> None:
+        self.engine.maybe_unload(self.get_idle_unload_seconds())
+
+    def list_projects(self) -> list[dict]:
+        return self.store.list_projects()
+
+    def create_project(self, name: str, description: str = "") -> dict:
+        return self.store.create_project(name, description)
+
+    def get_project_detail(self, project_id: int) -> dict:
+        return self.store.get_project_detail(project_id)
+
+    def list_references(self, project_id: int) -> list[dict]:
+        return self.store.list_voice_assets(project_id, "reference")
+
+    def list_styles(self, project_id: int) -> list[dict]:
+        return self.store.list_voice_assets(project_id, "style")
+
+    def list_assets(self, project_id: int) -> list[dict]:
+        return self.store.list_audio_assets(project_id)
+
+    def list_jobs(self, project_id: int | None = None) -> list[dict]:
+        return self.store.list_jobs(project_id)
+
+    def save_pronunciation_rule(self, project_id: int, source: str, replacement: str) -> dict:
+        return self.store.upsert_pronunciation_rule(project_id, source, replacement)
+
+    def ingest_reference(self, project_id: int, name: str, audio_path: str, transcript: str = "") -> tuple[dict, dict]:
+        analysis = self.engine.analyze_reference(audio_path, transcript, backend=self.get_asr_backend())
+        saved = self.store.save_voice_asset(
+            project_id=project_id,
+            kind="reference",
+            name=name,
+            audio_path=audio_path,
+            transcript=analysis.transcript,
+            analysis=analysis.model_dump(),
+        )
+        self.maybe_unload_idle_engine()
+        return saved, analysis.model_dump()
+
+    def ingest_style(
+        self,
+        project_id: int,
+        name: str,
+        audio_path: str,
+        transcript: str = "",
+        context_notes: str = "",
+        gen_text: str = "",
+    ) -> tuple[dict, dict]:
+        analysis = self.engine.analyze_style(
+            audio_path,
+            transcript,
+            context_notes,
+            gen_text=gen_text,
+            backend=self.get_asr_backend(),
+        )
+        payload = analysis.model_dump()
+        payload["context_notes"] = context_notes
+        saved = self.store.save_voice_asset(
+            project_id=project_id,
+            kind="style",
+            name=name,
+            audio_path=audio_path,
+            transcript=analysis.transcript,
+            analysis=payload,
+        )
+        self.maybe_unload_idle_engine()
+        return saved, payload
+
+    def estimate(self, request: GenerationRequest) -> dict:
+        reference = self.store.get_voice_asset(request.reference_id)
+        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
+        normalized_text = normalize_script(request.text, pronunciation_rules)
+        speed = request.speed if request.speed is not None else 1.0
+        if style and request.use_style_prompt and request.speed is None:
+            speed = float(style["analysis"].get("recommended_speed", speed))
+        speed, _, _ = apply_context_modifiers(speed, None, request.context_notes)
+        nfe_step = request.nfe_step or (
+            get_runtime_profile(self.get_runtime_profile_name()).preview_nfe_step
+            if request.mode == "preview"
+            else get_runtime_profile(self.get_runtime_profile_name()).final_nfe_step
+        )
+        estimate = self.engine.estimate_generation(
+            reference_audio_path=reference["audio_path"],
+            ref_text=reference["transcript"],
+            text=normalized_text,
+            speed=speed,
+            nfe_step=nfe_step,
+            engine_loaded=self.engine.is_loaded(),
+            queue_depth=self._job_queue.qsize(),
+        )
+        self.maybe_unload_idle_engine()
+        return estimate.model_dump()
+
+    def _job_output_dir(self, project: dict) -> Path:
+        output_dir = self.store.project_dir(project["slug"]) / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
+    def _execute_job(self, job_id: int, request: GenerationRequest) -> dict:
+        job = self.store.update_job(job_id, status="running")
+        project = self.store.get_project_summary(request.project_id)
+        reference = self.store.get_voice_asset(request.reference_id)
+        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
+        result = self.engine.render(
+            request,
+            reference,
+            style,
+            pronunciation_rules,
+            output_dir=self._job_output_dir(project),
+        )
+        asset = self.store.save_audio_asset(
+            project_id=request.project_id,
+            job_id=job_id,
+            kind=request.mode,
+            label=request.name,
+            path=result["audio_path"],
+            duration_seconds=result["duration_seconds"],
+            metadata=result,
+        )
+        final_result = {
+            "asset_id": asset["id"],
+            **result,
+        }
+        self.store.update_job(job_id, status="completed", result=final_result)
+        self.maybe_unload_idle_engine()
+        return self.store.get_job(job_id)
+
+    def render_now(self, request: GenerationRequest) -> dict:
+        job = self.store.create_job(request.project_id, request.name, request.model_dump())
+        try:
+            completed = self._execute_job(job["id"], request)
+        except Exception as exc:
+            completed = self.store.update_job(job["id"], status="failed", error_text=str(exc))
+        return completed
+
+    def _worker_loop(self) -> None:
+        while True:
+            try:
+                job_id = self._job_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._job_queue.empty():
+                    with self._worker_lock:
+                        self._worker = None
+                    self.maybe_unload_idle_engine()
+                    return
+                continue
+
+            if job_id in self._cancelled_jobs:
+                self._cancelled_jobs.discard(job_id)
+                self.store.update_job(job_id, status="cancelled", error_text="Cancelled before execution.")
+                self._job_queue.task_done()
+                continue
+
+            job = self.store.get_job(job_id)
+            self._current_job_id = job_id
+            try:
+                request = GenerationRequest.model_validate(job["recipe"])
+                self._execute_job(job_id, request)
+            except Exception as exc:
+                self.store.update_job(job_id, status="failed", error_text=str(exc))
+            finally:
+                self._current_job_id = None
+                self._job_queue.task_done()
+
+    def _ensure_worker(self) -> None:
+        with self._worker_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+                self._worker.start()
+
+    def enqueue_generation(self, request: GenerationRequest) -> dict:
+        job = self.store.create_job(request.project_id, request.name, request.model_dump())
+        self._job_queue.put(job["id"])
+        self._ensure_worker()
+        return job
+
+    def cancel_job(self, job_id: int) -> dict:
+        if self._current_job_id == job_id:
+            return self.store.update_job(job_id, error_text="Cancellation requested after the job already started.")
+        self._cancelled_jobs.add(job_id)
+        return self.store.update_job(job_id, status="cancelled", error_text="Cancellation requested.")
+
+    def export_asset_bundle(self, asset_id: int) -> str:
+        asset = self.store.get_audio_asset(asset_id)
+        project = self.store.get_project_summary(asset["project_id"])
+        bundle_dir = self.paths.exports / f"{project['slug']}-asset-{asset_id}"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_source = Path(asset["path"])
+        audio_target = bundle_dir / audio_source.name
+        shutil.copy2(audio_source, audio_target)
+
+        spec_source = Path(asset["metadata"].get("spectrogram_path", "")) if asset["metadata"].get("spectrogram_path") else None
+        spec_target = None
+        if spec_source and spec_source.exists():
+            spec_target = bundle_dir / spec_source.name
+            shutil.copy2(spec_source, spec_target)
+
+        metadata_pretty = html.escape(json.dumps(asset["metadata"], indent=2, ensure_ascii=True))
+        image_block = f'<img src="{spec_target.name}" alt="Spectrogram" style="max-width: 100%; border-radius: 14px;" />' if spec_target else ""
+        index_path = bundle_dir / "index.html"
+        index_path.write_text(
+            f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(asset['label'])}</title>
+  <style>
+    body {{ font-family: ui-sans-serif, system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 32px; background: #f4efe6; color: #182018; }}
+    main {{ background: rgba(255,255,255,0.82); border: 1px solid rgba(24,32,24,0.1); border-radius: 24px; padding: 24px; }}
+    audio {{ width: 100%; margin: 16px 0 24px; }}
+    pre {{ overflow: auto; padding: 16px; border-radius: 16px; background: #112316; color: #e6f2e9; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{html.escape(asset['label'])}</h1>
+    <p>Project: {html.escape(project['name'])}</p>
+    <audio controls src="{audio_target.name}"></audio>
+    {image_block}
+    <h2>Metadata</h2>
+    <pre>{metadata_pretty}</pre>
+  </main>
+</body>
+</html>
+""",
+            encoding="utf-8",
+        )
+        return str(index_path)
+
+    def system_profile(self) -> dict:
+        profile_name = self.get_runtime_profile_name()
+        profile = get_runtime_profile(profile_name)
+        return SystemProfileView(
+            profile=profile_name,
+            profile_label=profile.label,
+            description=profile.description,
+            engine_loaded=self.engine.is_loaded(),
+            asr_backend=self.get_asr_backend(),
+            device=self.engine.device,
+            queue_depth=self._job_queue.qsize(),
+            worker_alive=bool(self._worker and self._worker.is_alive()),
+            current_job_id=self._current_job_id,
+            idle_unload_seconds=self.get_idle_unload_seconds(),
+            root_path=str(self.paths.root),
+            cache_path=str(self.paths.cache),
+        ).model_dump()
+
+    def stage_upload(self, source_path: str) -> str:
+        source = Path(source_path)
+        suffix = source.suffix or ".wav"
+        with tempfile.NamedTemporaryFile(dir=self.paths.incoming, suffix=suffix, **tempfile_kwargs) as handle:
+            staged_path = Path(handle.name)
+        shutil.copy2(source, staged_path)
+        return str(staged_path)
+
+
+_service: StudioService | None = None
+_service_lock = threading.Lock()
+
+
+def get_service(paths: StudioPaths | None = None) -> StudioService:
+    global _service
+    if paths is not None:
+        return StudioService(paths=paths)
+    if _service is None:
+        with _service_lock:
+            if _service is None:
+                _service = StudioService()
+    return _service
