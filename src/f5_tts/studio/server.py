@@ -10,7 +10,7 @@ from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 
 from f5_tts.infer.utils_infer import tempfile_kwargs
-from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app
+from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app, studio_allowed_paths
 from f5_tts.studio.runtime import get_service
 from f5_tts.studio.schemas import GenerationRequest, ProjectCreate, PronunciationRuleCreate
 
@@ -125,7 +125,7 @@ def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
             app,
             studio_app,
             path="/app",
-            allowed_paths=[str(service.paths.root), str(service.paths.cache)],
+            allowed_paths=studio_allowed_paths(service),
             footer_links=[],
             pwa=True,
             theme=STUDIO_THEME,

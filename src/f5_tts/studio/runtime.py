@@ -650,17 +650,40 @@ class StudioService:
         return candidates
 
     def detect_latest_checkpoint(self) -> str:
+        candidates = self.list_checkpoint_candidates(limit=1)
+        if not candidates:
+            return ""
+        return candidates[0]
+
+    def list_checkpoint_candidates(self, limit: int = 16) -> list[str]:
         matches: list[Path] = []
+        patterns = (
+            "*/snapshot_*.safetensors",
+            "*/snapshot_*.pt",
+            "*/model_last.safetensors",
+            "*/model_last.pt",
+            "*/model_*.safetensors",
+            "*/model_*.pt",
+        )
         for root in self._search_checkpoint_roots():
             ckpt_root = root / "ckpts"
-            for pattern in ("*/model_last.pt", "*/model_last.safetensors", "*/model_*.pt", "*/model_*.safetensors"):
+            for pattern in patterns:
                 matches.extend(ckpt_root.glob(pattern))
 
-        filtered = [path for path in matches if path.is_file() and not path.name.startswith("pretrained_")]
-        if not filtered:
-            return ""
+        filtered = [path.resolve() for path in matches if path.is_file() and not path.name.startswith("pretrained_")]
         filtered.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return str(filtered[0])
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for path in filtered:
+            normalized = str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+            if len(unique) >= limit:
+                break
+        return unique
 
     def get_checkpoint_path(self) -> str:
         saved = (self.store.get_setting("checkpoint_path", "") or "").strip()

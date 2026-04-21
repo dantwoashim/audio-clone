@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import click
 
-from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app
+from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app, studio_allowed_paths
 from f5_tts.studio.runtime import get_service
 
 
@@ -24,7 +24,7 @@ def main(port, host, share, inbrowser):
         pwa=True,
         theme=STUDIO_THEME,
         css=APP_CSS,
-        allowed_paths=[str(service.paths.root), str(service.paths.cache)],
+        allowed_paths=studio_allowed_paths(service),
         show_error=True,
     )
 

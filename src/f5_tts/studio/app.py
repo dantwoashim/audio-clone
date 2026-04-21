@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import html
 import json
+import os
 import re
+from difflib import SequenceMatcher
+from pathlib import Path
 
 import gradio as gr
 
@@ -11,94 +15,476 @@ from f5_tts.studio.schemas import GenerationRequest
 
 
 TITLE = "Voice Studio Pro"
+VOICE_PROJECT_ROOT = Path(os.environ.get("VOICE_PROJECT_ROOT", Path.home() / "voice-project"))
+
+
+def studio_allowed_paths(service=None) -> list[str]:
+    allowed = set()
+    if service is not None:
+        allowed.add(str(service.paths.root))
+        allowed.add(str(service.paths.cache))
+    voice_output_root = VOICE_PROJECT_ROOT / "output"
+    if voice_output_root.exists():
+        allowed.add(str(voice_output_root))
+    return sorted(allowed)
 
 APP_CSS = """
 :root {
-  --studio-ink: #16231b;
-  --studio-muted: #5f6c63;
-  --studio-paper: #f5f1e8;
-  --studio-card: rgba(255, 252, 246, 0.9);
-  --studio-line: rgba(22, 35, 27, 0.12);
-  --studio-accent: #0f7c5b;
-  --studio-accent-2: #d95b43;
-  --studio-glow: rgba(15, 124, 91, 0.18);
+  --studio-bg: #efe3cf;
+  --studio-paper: rgba(252, 247, 239, 0.86);
+  --studio-paper-strong: rgba(255, 251, 245, 0.96);
+  --studio-ink: #161a1d;
+  --studio-muted: #666155;
+  --studio-line: rgba(22, 26, 29, 0.12);
+  --studio-accent: #0f7b63;
+  --studio-accent-2: #b04d2f;
+  --studio-shadow: 0 28px 70px rgba(63, 47, 24, 0.09);
 }
 
 .gradio-container {
+  color-scheme: light;
+  --body-background-fill: transparent;
+  --background-fill-primary: rgba(255, 250, 242, 0.88);
+  --background-fill-secondary: rgba(255, 248, 240, 0.76);
+  --block-background-fill: rgba(255, 250, 242, 0.9);
+  --block-border-color: rgba(22, 26, 29, 0.1);
+  --block-label-background-fill: rgba(255, 250, 242, 0.98);
+  --block-label-border-color: rgba(22, 26, 29, 0.1);
+  --block-label-text-color: var(--studio-accent);
+  --block-title-text-color: var(--studio-ink);
+  --input-background-fill: rgba(255, 250, 242, 0.96);
+  --input-border-color: rgba(22, 26, 29, 0.12);
+  --input-placeholder-color: #827b70;
+  --body-text-color: var(--studio-ink);
+  --body-text-color-subdued: var(--studio-muted);
+  --button-secondary-background-fill: rgba(255, 251, 244, 0.9);
+  --button-secondary-border-color: rgba(22, 26, 29, 0.12);
+  --button-secondary-text-color: var(--studio-ink);
+  --checkbox-label-text-color: var(--studio-ink);
+  --link-text-color: var(--studio-accent);
   background:
-    radial-gradient(circle at top left, rgba(217, 91, 67, 0.16), transparent 28%),
-    radial-gradient(circle at top right, rgba(15, 124, 91, 0.18), transparent 24%),
-    linear-gradient(180deg, #f7f2e8 0%, #efe6d4 100%);
+    radial-gradient(circle at 0% 0%, rgba(176, 77, 47, 0.14), transparent 28%),
+    radial-gradient(circle at 100% 0%, rgba(15, 123, 99, 0.16), transparent 24%),
+    linear-gradient(180deg, #f4ecde 0%, #eadfca 100%);
   color: var(--studio-ink);
 }
 
+.gradio-container, .gradio-container * {
+  font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+}
+
 .studio-shell {
-  max-width: 1320px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 22px 18px 40px;
+  padding: 24px 18px 54px;
 }
 
 .studio-hero,
-.studio-panel {
+.studio-panel,
+.studio-page-intro,
+.studio-overview,
+.studio-trained-overview {
   border: 1px solid var(--studio-line);
-  border-radius: 26px;
-  background: var(--studio-card);
-  box-shadow: 0 18px 55px rgba(60, 48, 28, 0.07);
-  backdrop-filter: blur(10px);
+  border-radius: 30px;
+  background: var(--studio-paper);
+  box-shadow: var(--studio-shadow);
+  backdrop-filter: blur(12px);
 }
 
 .studio-hero {
   overflow: hidden;
+  padding: 30px;
   margin-bottom: 18px;
-  padding: 28px;
+  background:
+    linear-gradient(135deg, rgba(251, 247, 240, 0.95), rgba(245, 234, 217, 0.82)),
+    radial-gradient(circle at top right, rgba(15, 123, 99, 0.18), transparent 32%);
 }
 
-.studio-hero h1 {
+.studio-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.studio-eyebrow {
+  margin: 0 0 10px;
+  color: var(--studio-accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.studio-brand {
   margin: 0;
-  font-size: clamp(2.6rem, 5vw, 4.4rem);
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: clamp(3.2rem, 6vw, 5.4rem);
   line-height: 0.92;
-  letter-spacing: -0.05em;
+  letter-spacing: -0.055em;
+  color: var(--studio-ink);
+  text-wrap: balance;
 }
 
-.studio-hero p {
-  margin: 16px 0 0;
+.studio-hero-copy {
   max-width: 760px;
+  margin: 16px 0 0;
   color: var(--studio-muted);
-  font-size: 1rem;
-  line-height: 1.65;
+  font-size: 1.02rem;
+  line-height: 1.72;
+}
+
+.studio-hero-aside {
+  display: grid;
+  gap: 14px;
+}
+
+.studio-hero-card {
+  min-height: 120px;
+  border: 1px solid rgba(22, 26, 29, 0.1);
+  border-radius: 24px;
+  padding: 18px 20px;
+  background: var(--studio-paper-strong);
+}
+
+.studio-hero-card strong {
+  display: block;
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  color: var(--studio-ink);
+}
+
+.studio-hero-card p,
+.studio-hero-card ul {
+  margin: 0;
+  color: var(--studio-muted);
+  line-height: 1.55;
+}
+
+.studio-hero-card ul {
+  padding-left: 18px;
 }
 
 .studio-panel {
-  padding: 18px;
+  padding: 20px;
 }
 
-.studio-tab-note {
+.studio-panel,
+.studio-panel h3,
+.studio-panel h4,
+.studio-panel strong,
+.studio-page-intro h3,
+.studio-overview h2,
+.studio-trained-overview h2 {
+  color: var(--studio-ink);
+}
+
+.studio-panel h3,
+.studio-panel h4,
+.studio-panel p:last-child {
+  margin-bottom: 0;
+}
+
+.studio-shell label,
+.studio-shell legend,
+.studio-shell .gradio-markdown p,
+.studio-shell .gradio-markdown strong,
+.studio-shell .gradio-markdown li {
+  color: var(--studio-ink) !important;
+}
+
+.studio-shell input,
+.studio-shell textarea,
+.studio-shell select,
+.studio-shell fieldset,
+.studio-shell [data-testid="block"],
+.studio-shell .block,
+.studio-shell .icon-button-wrapper,
+.studio-shell .form,
+.studio-shell .gradio-dropdown,
+.studio-shell .gradio-textbox,
+.studio-shell .gradio-number,
+.studio-shell .gradio-radio,
+.studio-shell .gradio-audio,
+.studio-shell .gradio-image,
+.studio-shell .gradio-code,
+.studio-shell .gradio-dataframe {
+  color: var(--studio-ink) !important;
+}
+
+.studio-shell input,
+.studio-shell textarea,
+.studio-shell fieldset,
+.studio-shell [data-testid="block"],
+.studio-shell .block,
+.studio-shell .icon-button-wrapper,
+.studio-shell .form,
+.studio-shell .gradio-dropdown,
+.studio-shell .gradio-textbox,
+.studio-shell .gradio-number,
+.studio-shell .gradio-code {
+  background: rgba(255, 250, 242, 0.88) !important;
+  border-color: rgba(22, 26, 29, 0.1) !important;
+}
+
+.studio-control-stack,
+.studio-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.studio-overview,
+.studio-trained-overview {
+  padding: 22px;
+}
+
+.studio-overview h2,
+.studio-trained-overview h2 {
+  margin: 8px 0 10px;
+  font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  font-size: clamp(2rem, 3vw, 3rem);
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+}
+
+.studio-overview-copy,
+.studio-trained-copy {
+  max-width: 760px;
+}
+
+.studio-overview-copy p,
+.studio-trained-copy p {
+  margin: 0;
   color: var(--studio-muted);
-  font-size: 0.95rem;
-  margin: 0 0 10px;
+  line-height: 1.66;
+}
+
+.studio-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.studio-stat {
+  border-radius: 22px;
+  border: 1px solid rgba(22, 26, 29, 0.08);
+  background: var(--studio-paper-strong);
+  padding: 16px;
+}
+
+.studio-stat-label {
+  display: block;
+  color: var(--studio-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.studio-stat-value {
+  display: block;
+  margin-top: 7px;
+  font-size: 1.18rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.studio-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.studio-mini {
+  border-top: 1px solid rgba(22, 26, 29, 0.08);
+  padding-top: 12px;
+}
+
+.studio-mini strong {
+  display: block;
+  font-size: 0.82rem;
+}
+
+.studio-mini span {
+  display: block;
+  color: var(--studio-muted);
+  font-size: 0.92rem;
+  margin-top: 4px;
+}
+
+.studio-page-intro {
+  padding: 20px 22px;
+  margin-bottom: 14px;
+}
+
+.studio-page-intro h3 {
+  margin: 6px 0 8px;
+  font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  font-size: clamp(1.7rem, 2.6vw, 2.5rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.studio-page-intro p {
+  margin: 0;
+  color: var(--studio-muted);
+  line-height: 1.65;
+}
+
+.studio-tabs .tab-nav {
+  gap: 10px;
+  padding: 0 0 16px;
+  background: transparent;
+  justify-content: flex-start;
+}
+
+.studio-tabs .tab-nav button {
+  border-radius: 999px !important;
+  border: 1px solid rgba(22, 26, 29, 0.1) !important;
+  background: rgba(255, 250, 242, 0.78) !important;
+  padding: 12px 18px !important;
+  color: var(--studio-ink) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em !important;
+}
+
+.studio-tabs .tab-nav button.selected {
+  background: linear-gradient(135deg, var(--studio-accent), #155f8b) !important;
+  color: #ffffff !important;
+  box-shadow: 0 14px 30px rgba(15, 123, 99, 0.24);
 }
 
 .studio-primary button {
   min-height: 52px;
   border-radius: 18px !important;
-  background: linear-gradient(135deg, #0f7c5b, #136d87) !important;
-  box-shadow: 0 16px 35px var(--studio-glow);
+  background: linear-gradient(135deg, var(--studio-accent), #155f8b) !important;
+  color: #ffffff !important;
+  box-shadow: 0 18px 34px rgba(15, 123, 99, 0.24);
 }
 
 .studio-secondary button {
   min-height: 48px;
-  border-radius: 16px !important;
+  border-radius: 18px !important;
+  background: rgba(255, 251, 244, 0.9) !important;
+  border: 1px solid rgba(22, 26, 29, 0.12) !important;
+  color: var(--studio-ink) !important;
+}
+
+.studio-audio-card audio {
+  width: 100%;
+}
+
+.studio-muted-note {
+  color: var(--studio-muted);
+  font-size: 0.94rem;
+  margin: 0;
+}
+
+.studio-panel .gradio-dataframe,
+.studio-panel .gr-code,
+.studio-panel .gr-json {
+  border-radius: 20px;
+  overflow: hidden;
+}
+
+.studio-shell .gradio-audio,
+.studio-shell .gradio-image,
+.studio-shell .gradio-code,
+.studio-shell .gradio-dataframe {
+  background: rgba(255, 250, 242, 0.78) !important;
+  border: 1px solid rgba(22, 26, 29, 0.1) !important;
+  border-radius: 20px !important;
+}
+
+.studio-shell .icon-button,
+.studio-shell button[aria-label="Clear"] {
+  opacity: 0.85;
+}
+
+.studio-shell label[data-testid="block-label"],
+.studio-shell label[data-testid="block-label"] span {
+  color: var(--studio-accent) !important;
+}
+
+.studio-shell table,
+.studio-shell thead,
+.studio-shell tbody,
+.studio-shell tr,
+.studio-shell th,
+.studio-shell td {
+  background: rgba(255, 250, 242, 0.96) !important;
+  color: var(--studio-ink) !important;
+  border-color: rgba(22, 26, 29, 0.1) !important;
+}
+
+.studio-shell .error,
+.studio-shell .gradio-container .toast-wrap .toast-body {
+  color: #fff;
+}
+
+.gradio-container footer,
+.gradio-container .built-with-gradio,
+.gradio-container .settings-trigger {
+  display: none !important;
+}
+
+@media (max-width: 1100px) {
+  .studio-hero-grid,
+  .studio-stat-grid,
+  .studio-mini-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .studio-shell {
+    padding: 18px 12px 34px;
+  }
+
+  .studio-hero,
+  .studio-panel,
+  .studio-page-intro,
+  .studio-overview,
+  .studio-trained-overview {
+    border-radius: 24px;
+  }
+
+  .studio-brand {
+    font-size: 2.7rem;
+  }
 }
 """
 
 HERO_HTML = f"""
 <section class="studio-hero">
-  <h1>{TITLE}</h1>
-  <p>
-    A local-first voice cloning studio built around F5-TTS, upgraded for real projects: saved references,
-    reusable style prompts, queue-backed batch jobs, A/B take review, export bundles, and an M4-aware runtime profile
-    so the whole machine does not get swallowed by one render.
-  </p>
+  <div class="studio-hero-grid">
+    <div>
+      <p class="studio-eyebrow">Local-first cloned voice workflow</p>
+      <h1 class="studio-brand">{TITLE}</h1>
+      <p class="studio-hero-copy">
+        Train, direct, and audition a voice on-device without turning the rest of your M4 Air into collateral damage.
+        The studio is tuned for saved identity references, reusable delivery prompts, checkpoint-aware inference, and
+        one clean workspace at a time.
+      </p>
+    </div>
+    <div class="studio-hero-aside">
+      <div class="studio-hero-card">
+        <strong>Three working lanes</strong>
+        <p>Create fresh takes, audition trained snapshots, then package everything from one place instead of spelunking through raw forms.</p>
+      </div>
+      <div class="studio-hero-card">
+        <strong>What changed</strong>
+        <ul>
+          <li>Clearer creation flow</li>
+          <li>Dedicated trained-voice page</li>
+          <li>Checkpoint-aware runtime controls</li>
+        </ul>
+      </div>
+    </div>
+  </div>
 </section>
 """
 
@@ -121,24 +507,120 @@ def _choice_pairs(items: list[dict], label_key: str = "name") -> list[tuple[str,
     return [(item[label_key], int(item["id"])) for item in items]
 
 
-def _table_rows(items: list[dict], columns: list[str]) -> list[list[object]]:
-    rows: list[list[object]] = []
-    for item in items:
-        rows.append([item.get(column, "") for column in columns])
-    return rows
+def _dropdown_value(choices: list[tuple[str, int]], index: int = 0) -> int | None:
+    return choices[index][1] if len(choices) > index else None
 
 
-def _project_markdown(project: dict | None) -> str:
-    if not project:
-        return "No project selected yet."
-    return (
-        f"### {project['name']}\n"
-        f"{project['description'] or 'No description yet.'}\n\n"
-        f"- References: {len(project['references'])}\n"
-        f"- Styles: {len(project['styles'])}\n"
-        f"- Takes: {len(project['assets'])}\n"
-        f"- Jobs: {len(project['jobs'])}"
+def _human_variant_name(name: str) -> str:
+    labels = {
+        "base": "Base model",
+        "ft_noema": "Finetuned snapshot · no EMA",
+        "ft_ema": "Finetuned snapshot · EMA",
+    }
+    return labels.get(name, name.replace("_", " ").strip().title())
+
+
+def _current_voice_label(system_profile: dict) -> str:
+    checkpoint_path = system_profile.get("checkpoint_path")
+    if not checkpoint_path:
+        return "Base model"
+    checkpoint_name = Path(checkpoint_path).name
+    lowered = checkpoint_name.lower()
+    if "noema" in lowered:
+        return "Finetuned snapshot · no EMA"
+    if "ema" in lowered:
+        return "Finetuned snapshot · EMA"
+    return checkpoint_name
+
+
+def _similarity_percent(expected: str, transcript: str) -> str:
+    if not expected or not transcript:
+        return "n/a"
+    ratio = SequenceMatcher(None, expected.lower().strip(), transcript.lower().strip()).ratio()
+    return f"{ratio * 100:.0f}%"
+
+
+def _page_intro_html(kicker: str, title: str, body: str) -> str:
+    return f"""
+    <section class="studio-page-intro">
+      <p class="studio-eyebrow">{html.escape(kicker)}</p>
+      <h3>{html.escape(title)}</h3>
+      <p>{html.escape(body)}</p>
+    </section>
+    """
+
+
+def _project_overview_html(project: dict, system_profile: dict) -> str:
+    description = project.get("description") or "No project description yet. Add one when this becomes a real delivery lane."
+    checkpoint_label = _current_voice_label(system_profile)
+    stats = [
+        ("Saved references", str(len(project["references"]))),
+        ("Style prompts", str(len(project["styles"]))),
+        ("Recorded takes", str(len(project["assets"]))),
+        ("Queued jobs", str(len([job for job in project["jobs"] if job["status"] in {'queued', 'running'}]))),
+    ]
+    stat_html = "".join(
+        f"""
+        <div class="studio-stat">
+          <span class="studio-stat-label">{html.escape(label)}</span>
+          <span class="studio-stat-value">{html.escape(value)}</span>
+        </div>
+        """
+        for label, value in stats
     )
+    return f"""
+    <section class="studio-overview">
+      <div class="studio-overview-copy">
+        <p class="studio-eyebrow">Project cockpit</p>
+        <h2>{html.escape(project['name'])}</h2>
+        <p>{html.escape(description)}</p>
+      </div>
+      <div class="studio-stat-grid">{stat_html}</div>
+      <div class="studio-mini-grid">
+        <div class="studio-mini">
+          <strong>Active voice</strong>
+          <span>{html.escape(checkpoint_label)}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Device</strong>
+          <span>{html.escape(str(system_profile.get('device', 'unknown')).upper())}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Runtime profile</strong>
+          <span>{html.escape(system_profile.get('profile_label', 'Balanced'))}</span>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def _runtime_snapshot_html(system_profile: dict) -> str:
+    checkpoint_label = _current_voice_label(system_profile)
+    checkpoint_path = system_profile.get("checkpoint_path")
+    checkpoint_note = Path(checkpoint_path).name if checkpoint_path else "Using the shipped base checkpoint."
+    return f"""
+    <section class="studio-trained-overview">
+      <div class="studio-trained-copy">
+        <p class="studio-eyebrow">Render runtime</p>
+        <h2>{html.escape(checkpoint_label)}</h2>
+        <p>{html.escape(checkpoint_note)}</p>
+      </div>
+      <div class="studio-mini-grid">
+        <div class="studio-mini">
+          <strong>Device</strong>
+          <span>{html.escape(str(system_profile.get('device', 'unknown')).upper())}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Queue</strong>
+          <span>{html.escape(str(system_profile.get('queue_depth', 0)))} waiting</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Engine</strong>
+          <span>{"Warm" if system_profile.get("engine_loaded") else "Cold"}</span>
+        </div>
+      </div>
+    </section>
+    """
 
 
 def _reference_rows(items: list[dict]) -> list[list[object]]:
@@ -207,20 +689,141 @@ def _rule_rows(items: list[dict]) -> list[list[object]]:
     return [[item["id"], item["source"], item["replacement"], item["updated_at"]] for item in items]
 
 
+def _checkpoint_choice_pairs(paths: list[str]) -> list[tuple[str, str]]:
+    choices = [("Base model (shipped)", "")]
+    for checkpoint_path in paths:
+        checkpoint_name = Path(checkpoint_path).name
+        lowered = checkpoint_name.lower()
+        if "noema" in lowered:
+            label = f"{checkpoint_name} · no EMA"
+        elif "ema" in lowered:
+            label = f"{checkpoint_name} · EMA"
+        elif "model_last" in lowered:
+            label = f"{checkpoint_name} · raw training checkpoint"
+        else:
+            label = checkpoint_name
+        choices.append((label, checkpoint_path))
+    return choices
+
+
+def _discover_trained_payload(system_profile: dict, checkpoint_choices: list[tuple[str, str]]) -> dict[str, object]:
+    output_root = VOICE_PROJECT_ROOT / "output"
+    bakeoff_summaries = sorted(
+        output_root.glob("bakeoff_*/summary.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    bakeoff_data: list[dict] = []
+    if bakeoff_summaries:
+        try:
+            bakeoff_data = json.loads(bakeoff_summaries[0].read_text(encoding="utf-8"))
+        except Exception:
+            bakeoff_data = []
+
+    variant_lookup = {item.get("name"): item for item in bakeoff_data if isinstance(item, dict)}
+    rows = []
+    for item in bakeoff_data:
+        expected = item.get("expected_text", "")
+        transcript = item.get("transcript", "")
+        rows.append(
+            [
+                _human_variant_name(item.get("name", "unknown")),
+                _similarity_percent(expected, transcript),
+                transcript,
+            ]
+        )
+
+    longform_candidates = sorted(
+        output_root.glob("*/final_stitched.wav"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    longform_audio = str(longform_candidates[0]) if longform_candidates else None
+    active_voice = _current_voice_label(system_profile)
+    checkpoint_path = system_profile.get("checkpoint_path")
+    checkpoint_name = Path(checkpoint_path).name if checkpoint_path else "Base checkpoint"
+    latest_bakeoff = bakeoff_summaries[0].parent.name if bakeoff_summaries else "No bakeoff recordings yet"
+    comparison_count = str(len(rows))
+    overview_html = f"""
+    <section class="studio-trained-overview">
+      <div class="studio-trained-copy">
+        <p class="studio-eyebrow">Trained voice destination</p>
+        <h2>{html.escape(active_voice)}</h2>
+        <p>
+          This page is for auditioning the finetuned model, not just changing settings. Compare bakeoff takes,
+          switch checkpoints, and keep one authoritative place for trained recordings.
+        </p>
+      </div>
+      <div class="studio-stat-grid">
+        <div class="studio-stat">
+          <span class="studio-stat-label">Active checkpoint</span>
+          <span class="studio-stat-value">{html.escape(checkpoint_name)}</span>
+        </div>
+        <div class="studio-stat">
+          <span class="studio-stat-label">Bakeoff set</span>
+          <span class="studio-stat-value">{html.escape(latest_bakeoff)}</span>
+        </div>
+        <div class="studio-stat">
+          <span class="studio-stat-label">Compared variants</span>
+          <span class="studio-stat-value">{html.escape(comparison_count)}</span>
+        </div>
+        <div class="studio-stat">
+          <span class="studio-stat-label">Long-form sample</span>
+          <span class="studio-stat-value">{'Ready' if longform_audio else 'Missing'}</span>
+        </div>
+      </div>
+    </section>
+    """
+    return {
+        "overview_html": overview_html,
+        "rows": rows,
+        "base_audio": variant_lookup.get("base", {}).get("audio_path"),
+        "ft_noema_audio": variant_lookup.get("ft_noema", {}).get("audio_path"),
+        "ft_ema_audio": variant_lookup.get("ft_ema", {}).get("audio_path"),
+        "longform_audio": longform_audio,
+        "checkpoint_choices": checkpoint_choices,
+    }
+
+
 def create_studio_app():
     service = get_service()
 
-    def project_updates(selected_project_id: int | None = None):
+    def _preferred_project_id(projects: list[dict]) -> int | None:
+        saved_project_id = (service.store.get_setting("active_project_id", "") or "").strip()
+        if saved_project_id.isdigit():
+            saved_id = int(saved_project_id)
+            if any(int(project["id"]) == saved_id for project in projects):
+                return saved_id
+
+        richest_project_id = None
+        richest_score = -1
+        for project in projects:
+            detail = service.get_project_detail(int(project["id"]))
+            score = (
+                len(detail["references"]) * 100
+                + len(detail["styles"]) * 10
+                + len(detail["assets"]) * 5
+                + len(detail["jobs"])
+            )
+            if score > richest_score:
+                richest_score = score
+                richest_project_id = int(project["id"])
+        return richest_project_id
+
+    def _project_state(selected_project_id: int | None = None) -> dict[str, object]:
         projects = service.list_projects()
-        choices = _choice_pairs(projects)
-        if not choices:
+        project_choices = _choice_pairs(projects)
+        if not project_choices:
             project = service.create_project("Studio Sandbox", "Default local project for previews.")
             projects = service.list_projects()
-            choices = _choice_pairs(projects)
+            project_choices = _choice_pairs(projects)
             selected_project_id = project["id"]
-        valid_ids = {value for _, value in choices}
+
+        valid_ids = {value for _, value in project_choices}
         if selected_project_id not in valid_ids:
-            selected_project_id = choices[0][1]
+            selected_project_id = _preferred_project_id(projects) or project_choices[0][1]
+
+        service.store.set_setting("active_project_id", str(selected_project_id))
 
         project_detail = service.get_project_detail(int(selected_project_id))
         references = project_detail["references"]
@@ -228,30 +831,81 @@ def create_studio_app():
         assets = project_detail["assets"]
         jobs = project_detail["jobs"]
         rules = project_detail["pronunciation_rules"]
+        system_profile = service.system_profile()
 
         reference_choices = _choice_pairs(references)
         style_choices = [("No style prompt", 0)] + _choice_pairs(styles)
         asset_choices = _choice_pairs(assets, label_key="label")
-        job_choices = [(f"{job['id']} - {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}]
+        job_choices = [(f"{job['id']} · {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}]
+        checkpoint_choices = _checkpoint_choice_pairs(service.list_checkpoint_candidates())
+        trained_payload = _discover_trained_payload(system_profile, checkpoint_choices)
+        current_checkpoint = system_profile.get("checkpoint_path") or ""
+        current_use_ema = bool(system_profile.get("use_ema", True))
+
+        return {
+            "project_choices": project_choices,
+            "selected_project_id": selected_project_id,
+            "project_overview": _project_overview_html(project_detail, system_profile),
+            "reference_choices": reference_choices,
+            "reference_value": _dropdown_value(reference_choices),
+            "style_choices": style_choices,
+            "style_value": 0,
+            "reference_rows": _reference_rows(references),
+            "style_rows": _style_rows(styles),
+            "asset_rows": _asset_rows(assets),
+            "job_rows": _job_rows(jobs),
+            "rule_rows": _rule_rows(rules),
+            "asset_choices": asset_choices,
+            "take_a_value": _dropdown_value(asset_choices),
+            "take_b_value": _dropdown_value(asset_choices, 1) or _dropdown_value(asset_choices),
+            "export_value": _dropdown_value(asset_choices),
+            "job_choices": job_choices,
+            "job_value": _dropdown_value(job_choices),
+            "runtime_snapshot": _runtime_snapshot_html(system_profile),
+            "system_profile_json": json.dumps(system_profile, indent=2),
+            "current_checkpoint": current_checkpoint,
+            "current_use_ema": current_use_ema,
+            "trained_overview": trained_payload["overview_html"],
+            "trained_rows": trained_payload["rows"],
+            "trained_base_audio": trained_payload["base_audio"],
+            "trained_ft_noema_audio": trained_payload["ft_noema_audio"],
+            "trained_ft_ema_audio": trained_payload["ft_ema_audio"],
+            "trained_longform_audio": trained_payload["longform_audio"],
+            "checkpoint_choices": checkpoint_choices,
+        }
+
+    def project_updates(selected_project_id: int | None = None):
+        state = _project_state(selected_project_id)
 
         return (
-            gr.update(choices=choices, value=selected_project_id),
-            _project_markdown(project_detail),
-            gr.update(choices=reference_choices, value=reference_choices[0][1] if reference_choices else None),
-            gr.update(choices=style_choices, value=0),
-            gr.update(choices=reference_choices, value=reference_choices[0][1] if reference_choices else None),
-            gr.update(choices=style_choices, value=0),
-            _reference_rows(references),
-            _style_rows(styles),
-            _asset_rows(assets),
-            _job_rows(jobs),
-            _job_rows(jobs),
-            _rule_rows(rules),
-            gr.update(choices=asset_choices, value=asset_choices[0][1] if asset_choices else None),
-            gr.update(choices=asset_choices, value=asset_choices[1][1] if len(asset_choices) > 1 else (asset_choices[0][1] if asset_choices else None)),
-            gr.update(choices=asset_choices, value=asset_choices[0][1] if asset_choices else None),
-            gr.update(choices=job_choices, value=job_choices[0][1] if job_choices else None),
-            json.dumps(service.system_profile(), indent=2),
+            gr.update(choices=state["project_choices"], value=state["selected_project_id"]),
+            state["project_overview"],
+            gr.update(choices=state["reference_choices"], value=state["reference_value"]),
+            gr.update(choices=state["style_choices"], value=state["style_value"]),
+            gr.update(choices=state["reference_choices"], value=state["reference_value"]),
+            gr.update(choices=state["style_choices"], value=state["style_value"]),
+            state["reference_rows"],
+            state["style_rows"],
+            state["asset_rows"],
+            state["job_rows"],
+            state["job_rows"],
+            state["rule_rows"],
+            gr.update(choices=state["asset_choices"], value=state["take_a_value"]),
+            gr.update(choices=state["asset_choices"], value=state["take_b_value"]),
+            gr.update(choices=state["asset_choices"], value=state["export_value"]),
+            gr.update(choices=state["job_choices"], value=state["job_value"]),
+            state["runtime_snapshot"],
+            state["system_profile_json"],
+            gr.update(value=state["current_checkpoint"]),
+            gr.update(value=state["current_use_ema"]),
+            state["trained_overview"],
+            state["trained_rows"],
+            state["trained_base_audio"],
+            state["trained_ft_noema_audio"],
+            state["trained_ft_ema_audio"],
+            state["trained_longform_audio"],
+            gr.update(choices=state["checkpoint_choices"], value=state["current_checkpoint"]),
+            gr.update(value=state["current_use_ema"]),
         )
 
     def create_project(name: str, description: str, current_project_id: int | None):
@@ -431,7 +1085,6 @@ def create_studio_app():
         scripts = [chunk.strip() for chunk in re.split(r"\n\s*\n", batch_scripts) if chunk.strip()]
         if not scripts:
             raise gr.Error("Add one or more scripts separated by blank lines.")
-        created = []
         for index, script in enumerate(scripts, start=1):
             request = build_request(
                 project_id,
@@ -447,9 +1100,9 @@ def create_studio_app():
                 False,
                 False,
             )
-            created.append(service.enqueue_generation(request))
+            service.enqueue_generation(request)
         refresh = project_updates(project_id)
-        status = f"Queued {len(created)} jobs. The worker will process them one at a time."
+        status = f"Queued {len(scripts)} jobs. The worker will process them one at a time."
         return (status,) + refresh
 
     def compare_takes(take_a_id: int | None, take_b_id: int | None):
@@ -473,25 +1126,48 @@ def create_studio_app():
         bundle = service.export_asset_bundle(int(asset_id))
         return bundle, f"Export bundle created at {bundle}"
 
-    def detect_checkpoint():
+    def detect_checkpoint_widgets():
         detected = service.detect_latest_checkpoint()
+        choices = _checkpoint_choice_pairs(service.list_checkpoint_candidates())
         if not detected:
-            return "", "No local finetune checkpoint was detected."
-        return detected, f"Detected latest checkpoint: {detected}"
+            status = "No local finetune checkpoint was detected."
+            return "", gr.update(choices=choices, value=""), status, status
+        status = f"Detected latest checkpoint: {detected}"
+        return detected, gr.update(choices=choices, value=detected), status, status
 
     def save_settings(
+        project_id: int,
         profile_name: str,
         asr_backend: str,
         idle_unload_seconds: int,
-        checkpoint_path: str,
-        use_ema: bool,
+        checkpoint_path_value: str,
+        use_ema_value: bool,
     ):
         service.set_runtime_profile(profile_name)
         service.set_asr_backend(asr_backend)
         service.set_idle_unload_seconds(idle_unload_seconds)
-        service.set_checkpoint_path(checkpoint_path)
-        service.set_use_ema(use_ema)
-        return json.dumps(service.system_profile(), indent=2), "Settings saved."
+        service.set_checkpoint_path(checkpoint_path_value)
+        service.set_use_ema(use_ema_value)
+        refresh = project_updates(project_id)
+        return refresh + ("Settings saved.", "Settings saved.")
+
+    def apply_trained_checkpoint(project_id: int, checkpoint_value: str, use_ema_value: bool):
+        service.set_checkpoint_path(checkpoint_value)
+        service.set_use_ema(use_ema_value)
+        refresh = project_updates(project_id)
+        message = (
+            f"Trained voice updated. Active checkpoint: {checkpoint_value}"
+            if checkpoint_value
+            else "Switched back to the shipped base model."
+        )
+        return refresh + (message, message)
+
+    def switch_to_base_model(project_id: int):
+        service.set_checkpoint_path("")
+        service.set_use_ema(True)
+        refresh = project_updates(project_id)
+        message = "Switched back to the shipped base model."
+        return refresh + (message, message)
 
     def save_rule(project_id: int, source: str, replacement: str):
         if not project_id:
@@ -509,6 +1185,8 @@ def create_studio_app():
         refresh = project_updates(project_id)
         return ("Cancellation requested.",) + refresh
 
+    initial_state = _project_state()
+
     with gr.Blocks(
         title=TITLE,
         delete_cache=(3600, 7200),
@@ -518,25 +1196,40 @@ def create_studio_app():
             gr.HTML(HERO_HTML)
 
             with gr.Row():
-                with gr.Column(scale=7, elem_classes=["studio-panel"]):
-                    gr.Markdown("### Active project")
-                    active_project = gr.Dropdown(label="Project", choices=[], interactive=True)
-                    project_summary = gr.Markdown()
-                with gr.Column(scale=5, elem_classes=["studio-panel"]):
-                    gr.Markdown("### New project")
-                    project_name = gr.Textbox(label="Project name", placeholder="Client delivery pack")
-                    project_description = gr.Textbox(label="Description", lines=3)
+                with gr.Column(scale=4, elem_classes=["studio-panel", "studio-control-stack"]):
+                    gr.Markdown("### Project rail")
+                    gr.Markdown(
+                        "Choose the active project, create a new one, and keep one delivery lane open at a time.",
+                        elem_classes=["studio-muted-note"],
+                    )
+                    active_project = gr.Dropdown(
+                        label="Active project",
+                        choices=initial_state["project_choices"],
+                        value=initial_state["selected_project_id"],
+                        interactive=True,
+                    )
+                    project_name = gr.Textbox(label="New project name", placeholder="Narrative Audio")
+                    project_description = gr.Textbox(label="Description", lines=3, placeholder="Client delivery pack, in-house narration, character study...")
                     with gr.Row():
                         create_project_btn = gr.Button("Create project", elem_classes=["studio-secondary"])
-                        refresh_btn = gr.Button("Refresh library", elem_classes=["studio-secondary"])
+                        refresh_btn = gr.Button("Refresh", elem_classes=["studio-secondary"])
                     create_project_status = gr.Textbox(label="Project status", interactive=False)
 
-            with gr.Tabs():
+                with gr.Column(scale=8):
+                    project_overview = gr.HTML(value=initial_state["project_overview"])
+
+            with gr.Tabs(elem_classes=["studio-tabs"]):
                 with gr.Tab("Create"):
-                    gr.Markdown("Build references, save styles, estimate runtime, then render a quick preview or a final take.", elem_classes=["studio-tab-note"])
+                    gr.HTML(
+                        _page_intro_html(
+                            "Creation",
+                            "Build the take, not the clutter.",
+                            "Identity on the left, script in the middle, live playback on the right. The page should feel like direction, not paperwork.",
+                        )
+                    )
                     with gr.Row():
-                        with gr.Column(scale=5, elem_classes=["studio-panel"]):
-                            gr.Markdown("### Reference voice")
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Identity")
                             reference_name = gr.Textbox(label="Reference name", value="Lead Voice")
                             reference_audio = gr.Audio(label="Reference audio", type="filepath", sources=["upload", "microphone"])
                             reference_text = gr.Textbox(label="Reference transcript", lines=4, placeholder="Leave blank to transcribe locally.")
@@ -546,30 +1239,35 @@ def create_studio_app():
                             )
                             save_reference_btn = gr.Button("Analyze and save reference", elem_classes=["studio-secondary"])
                             reference_status = gr.Textbox(label="Reference status", lines=5, interactive=False)
-                            reference_choice = gr.Dropdown(label="Saved references", choices=[])
-
-                        with gr.Column(scale=5, elem_classes=["studio-panel"]):
-                            gr.Markdown("### Style prompt")
+                            reference_choice = gr.Dropdown(
+                                label="Saved reference",
+                                choices=initial_state["reference_choices"],
+                                value=initial_state["reference_value"],
+                            )
+                            gr.Markdown("### Delivery prompt")
                             style_name = gr.Textbox(label="Style name", value="Calm Narrator")
                             style_audio = gr.Audio(label="Style prompt audio", type="filepath", sources=["upload", "microphone"])
                             style_text = gr.Textbox(label="Style transcript", lines=3, placeholder="Leave blank to transcribe locally.")
                             context_notes = gr.Textbox(
                                 label="Delivery context",
                                 lines=3,
-                                placeholder="Examples: calm demo, energetic trailer, soft whisper, urgent support update.",
+                                placeholder="Examples: calm narrator, energetic trailer, soft whisper, urgent support update.",
                             )
                             save_style_btn = gr.Button("Analyze and save style", elem_classes=["studio-secondary"])
                             style_status = gr.Textbox(label="Style status", lines=5, interactive=False)
-                            style_choice = gr.Dropdown(label="Saved styles", choices=[])
+                            style_choice = gr.Dropdown(
+                                label="Saved style",
+                                choices=initial_state["style_choices"],
+                                value=initial_state["style_value"],
+                            )
 
-                    with gr.Row():
-                        with gr.Column(scale=7, elem_classes=["studio-panel"]):
-                            gr.Markdown("### Script and render recipe")
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Script workspace")
                             preset_choice = gr.Dropdown(label="Starter preset", choices=list(SCRIPT_PRESETS.keys()), value="Product demo")
                             load_preset_btn = gr.Button("Load preset", elem_classes=["studio-secondary"])
                             render_name = gr.Textbox(label="Take name", value="Final Render")
-                            render_text = gr.Textbox(label="Script", lines=10, value=SCRIPT_PRESETS["Product demo"])
-                            use_style_prompt = gr.Checkbox(label="Use style prompt during generation", value=True)
+                            render_text = gr.Textbox(label="Script", lines=14, value=SCRIPT_PRESETS["Product demo"])
+                            use_style_prompt = gr.Checkbox(label="Use saved style prompt during generation", value=True)
                             render_mode = gr.Radio(label="Render mode", choices=["preview", "final"], value="final")
                             with gr.Accordion("Advanced controls", open=False):
                                 speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
@@ -584,73 +1282,174 @@ def create_studio_app():
                                 label="Render status",
                                 lines=6,
                                 interactive=False,
-                                value="Select a project, save a clean reference, then generate a quick preview or a final render.",
+                                value="Select a project, save a clean reference, and render a first take.",
                             )
 
-                        with gr.Column(scale=5, elem_classes=["studio-panel"]):
-                            gr.Markdown("### Latest output")
-                            output_audio = gr.Audio(label="Generated take", type="filepath")
+                        with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
+                            runtime_snapshot = gr.HTML(value=initial_state["runtime_snapshot"])
+                            output_audio = gr.Audio(label="Latest output", type="filepath", elem_classes=["studio-audio-card"])
                             output_spectrogram = gr.Image(label="Spectrogram")
-                            system_profile_create = gr.JSON(label="Runtime profile")
+
+                with gr.Tab("Trained Voice"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Trained voice",
+                            "A separate destination for the finetuned model.",
+                            "This page is for checkpoint choice, bakeoff review, and trained recordings. You should not need to hunt through generic library pages to hear what the training actually did.",
+                        )
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            trained_overview = gr.HTML(value=initial_state["trained_overview"])
+                            trained_checkpoint_choice = gr.Dropdown(
+                                label="Checkpoint to audition",
+                                choices=initial_state["checkpoint_choices"],
+                                value=initial_state["current_checkpoint"],
+                            )
+                            trained_use_ema = gr.Checkbox(
+                                label="Use EMA weights for the selected checkpoint",
+                                value=initial_state["current_use_ema"],
+                            )
+                            with gr.Row():
+                                trained_detect_checkpoint_btn = gr.Button("Detect latest checkpoint", elem_classes=["studio-secondary"])
+                                trained_apply_btn = gr.Button("Use selected checkpoint", elem_classes=["studio-primary"])
+                            trained_base_btn = gr.Button("Switch back to base model", elem_classes=["studio-secondary"])
+                            trained_page_status = gr.Textbox(
+                                label="Trained voice status",
+                                interactive=False,
+                                lines=4,
+                                value="The current trained checkpoint and bakeoff recordings will appear here.",
+                            )
+
+                        with gr.Column(scale=7, elem_classes=["studio-panel", "studio-stack"]):
+                            trained_bakeoff_table = gr.Dataframe(
+                                headers=["Variant", "Readback score", "Transcript"],
+                                datatype=["str", "str", "str"],
+                                interactive=False,
+                                label="Bakeoff recordings",
+                                value=initial_state["trained_rows"],
+                            )
+                            trained_longform_audio = gr.Audio(
+                                label="Latest long-form trained render",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                                value=initial_state["trained_longform_audio"],
+                            )
+
+                    with gr.Row():
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Base model")
+                            trained_base_audio = gr.Audio(
+                                label="Bakeoff · base",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                                value=initial_state["trained_base_audio"],
+                            )
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Finetuned snapshot · no EMA")
+                            trained_ft_noema_audio = gr.Audio(
+                                label="Bakeoff · no EMA",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                                value=initial_state["trained_ft_noema_audio"],
+                            )
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Finetuned snapshot · EMA")
+                            trained_ft_ema_audio = gr.Audio(
+                                label="Bakeoff · EMA",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                                value=initial_state["trained_ft_ema_audio"],
+                            )
 
                 with gr.Tab("Library"):
-                    gr.Markdown("Review what is saved in the active project, compare takes, and export bundles for sharing.", elem_classes=["studio-tab-note"])
+                    gr.HTML(
+                        _page_intro_html(
+                            "Library",
+                            "Everything saved in the active project.",
+                            "References, style prompts, takes, and exports live here. The goal is fast auditioning and retrieval, not an endless card wall.",
+                        )
+                    )
                     with gr.Row():
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             references_table = gr.Dataframe(
                                 headers=["ID", "Name", "Duration", "ASR", "Warnings"],
                                 datatype=["number", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Reference library",
+                                value=initial_state["reference_rows"],
                             )
                             styles_table = gr.Dataframe(
                                 headers=["ID", "Name", "Duration", "Speed", "Keywords"],
                                 datatype=["number", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Style library",
+                                value=initial_state["style_rows"],
                             )
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             assets_table = gr.Dataframe(
                                 headers=["ID", "Kind", "Label", "Duration", "Created"],
                                 datatype=["number", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Saved takes",
+                                value=initial_state["asset_rows"],
                             )
                             jobs_table = gr.Dataframe(
                                 headers=["ID", "Name", "Status", "Updated", "Notes"],
                                 datatype=["number", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Recent jobs",
+                                value=initial_state["job_rows"],
                             )
                             rules_table = gr.Dataframe(
                                 headers=["ID", "Source", "Replacement", "Updated"],
                                 datatype=["number", "str", "str", "str"],
                                 interactive=False,
                                 label="Pronunciation rules",
+                                value=initial_state["rule_rows"],
                             )
 
                     with gr.Row():
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### A/B compare")
-                            take_a = gr.Dropdown(label="Take A", choices=[])
-                            take_b = gr.Dropdown(label="Take B", choices=[])
+                            take_a = gr.Dropdown(label="Take A", choices=initial_state["asset_choices"], value=initial_state["take_a_value"])
+                            take_b = gr.Dropdown(label="Take B", choices=initial_state["asset_choices"], value=initial_state["take_b_value"])
                             compare_btn = gr.Button("Load comparison", elem_classes=["studio-secondary"])
-                            compare_audio_a = gr.Audio(label="Take A audio", type="filepath")
+                            compare_audio_a = gr.Audio(label="Take A audio", type="filepath", elem_classes=["studio-audio-card"])
                             compare_meta_a = gr.Code(label="Take A metadata", language="json")
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
-                            export_take_choice = gr.Dropdown(label="Export a take", choices=[])
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Export")
+                            export_take_choice = gr.Dropdown(
+                                label="Export a take",
+                                choices=initial_state["asset_choices"],
+                                value=initial_state["export_value"],
+                            )
                             export_btn = gr.Button("Create share bundle", elem_classes=["studio-secondary"])
                             export_status = gr.Textbox(label="Export status", interactive=False)
                             export_file = gr.File(label="Bundle index", interactive=False)
-                            compare_audio_b = gr.Audio(label="Take B audio", type="filepath")
+                            compare_audio_b = gr.Audio(label="Take B audio", type="filepath", elem_classes=["studio-audio-card"])
                             compare_meta_b = gr.Code(label="Take B metadata", language="json")
 
-                with gr.Tab("Batch"):
-                    gr.Markdown("Queue several scripts against the same voice setup. Jobs run one at a time to protect the M4 Air.", elem_classes=["studio-tab-note"])
+                with gr.Tab("Queue"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Queue",
+                            "Batch jobs without cooking the machine.",
+                            "Use one shared voice setup, queue several blocks, and let the worker process them one at a time.",
+                        )
+                    )
                     with gr.Row():
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
-                            batch_reference = gr.Dropdown(label="Batch reference", choices=[])
-                            batch_style = gr.Dropdown(label="Batch style", choices=[])
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
+                            batch_reference = gr.Dropdown(
+                                label="Batch reference",
+                                choices=initial_state["reference_choices"],
+                                value=initial_state["reference_value"],
+                            )
+                            batch_style = gr.Dropdown(
+                                label="Batch style",
+                                choices=initial_state["style_choices"],
+                                value=initial_state["style_value"],
+                            )
                             batch_mode = gr.Radio(label="Batch mode", choices=["preview", "final"], value="final")
                             batch_use_style = gr.Checkbox(label="Use saved style prompt", value=True)
                             batch_context = gr.Textbox(label="Shared delivery context", lines=3)
@@ -661,20 +1460,31 @@ def create_studio_app():
                             )
                             batch_submit_btn = gr.Button("Queue batch", elem_classes=["studio-primary"])
                             batch_status = gr.Textbox(label="Batch status", interactive=False)
-                        with gr.Column(scale=6, elem_classes=["studio-panel"]):
-                            cancel_job_choice = gr.Dropdown(label="Cancelable jobs", choices=[])
+                        with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
+                            cancel_job_choice = gr.Dropdown(
+                                label="Cancelable jobs",
+                                choices=initial_state["job_choices"],
+                                value=initial_state["job_value"],
+                            )
                             cancel_job_btn = gr.Button("Cancel selected job", elem_classes=["studio-secondary"])
                             batch_jobs_table = gr.Dataframe(
                                 headers=["ID", "Name", "Status", "Updated", "Notes"],
                                 datatype=["number", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Queue monitor",
+                                value=initial_state["job_rows"],
                             )
 
-                with gr.Tab("Settings"):
-                    gr.Markdown("Tune how aggressive the local runtime should be and add pronunciation rules for the active project.", elem_classes=["studio-tab-note"])
+                with gr.Tab("Runtime"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Runtime",
+                            "System controls and pronunciation rules.",
+                            "This is the operations page: runtime profile, checkpoint override, ASR backend, and the per-project pronunciation dictionary.",
+                        )
+                    )
                     with gr.Row():
-                        with gr.Column(scale=5, elem_classes=["studio-panel"]):
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
                             profile_choice = gr.Dropdown(
                                 label="Runtime profile",
                                 choices=[(profile.label, profile.name) for profile in PROFILE_MAP.values()],
@@ -692,150 +1502,89 @@ def create_studio_app():
                             )
                             checkpoint_path = gr.Textbox(
                                 label="Inference checkpoint override",
-                                value=service.get_checkpoint_path(),
+                                value=initial_state["current_checkpoint"],
                                 lines=2,
                                 placeholder="Leave blank to use the shipped base model.",
                             )
-                            use_ema = gr.Checkbox(label="Use EMA weights", value=service.get_use_ema())
-                            detect_checkpoint_btn = gr.Button("Detect latest local finetune", elem_classes=["studio-secondary"])
-                            save_settings_btn = gr.Button("Save runtime settings", elem_classes=["studio-secondary"])
+                            use_ema = gr.Checkbox(label="Use EMA weights", value=initial_state["current_use_ema"])
+                            with gr.Row():
+                                detect_checkpoint_btn = gr.Button("Detect latest checkpoint", elem_classes=["studio-secondary"])
+                                save_settings_btn = gr.Button("Save runtime settings", elem_classes=["studio-primary"])
                             settings_status = gr.Textbox(label="Settings status", interactive=False)
-                        with gr.Column(scale=7, elem_classes=["studio-panel"]):
+                        with gr.Column(scale=7, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Pronunciation dictionary")
-                            rule_source = gr.Textbox(label="Source phrase", placeholder="GPU")
-                            rule_replacement = gr.Textbox(label="Replacement phrase", placeholder="gee pee you")
+                            rule_source = gr.Textbox(label="Source phrase", placeholder="bhauju")
+                            rule_replacement = gr.Textbox(label="Replacement phrase", placeholder="bah-joo")
                             save_rule_btn = gr.Button("Save pronunciation rule", elem_classes=["studio-secondary"])
                             rule_status = gr.Textbox(label="Rule status", interactive=False)
-                            system_profile_settings = gr.Code(label="System profile", language="json")
-                            helper_markdown = gr.Markdown(
-                                "Launch locally with `f5-tts_voice-studio`, or mount the API + studio together with `f5-tts_studio-server`."
+                            system_profile_settings = gr.Code(
+                                label="System profile",
+                                language="json",
+                                value=initial_state["system_profile_json"],
+                            )
+                            gr.Markdown(
+                                "Launch locally with `f5-tts_voice-studio`, or mount the API and UI together with `f5-tts_studio-server`.",
+                                elem_classes=["studio-muted-note"],
                             )
 
+            refresh_outputs = [
+                active_project,
+                project_overview,
+                reference_choice,
+                style_choice,
+                batch_reference,
+                batch_style,
+                references_table,
+                styles_table,
+                assets_table,
+                jobs_table,
+                batch_jobs_table,
+                rules_table,
+                take_a,
+                take_b,
+                export_take_choice,
+                cancel_job_choice,
+                runtime_snapshot,
+                system_profile_settings,
+                checkpoint_path,
+                use_ema,
+                trained_overview,
+                trained_bakeoff_table,
+                trained_base_audio,
+                trained_ft_noema_audio,
+                trained_ft_ema_audio,
+                trained_longform_audio,
+                trained_checkpoint_choice,
+                trained_use_ema,
+            ]
+
             load_preset_btn.click(load_preset, inputs=[preset_choice], outputs=[render_text])
-            refresh_btn.click(
-                project_updates,
-                inputs=[active_project],
-                outputs=[
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
-            )
-            active_project.change(
-                project_updates,
-                inputs=[active_project],
-                outputs=[
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
-            )
+
+            refresh_btn.click(project_updates, inputs=[active_project], outputs=refresh_outputs)
+            active_project.change(project_updates, inputs=[active_project], outputs=refresh_outputs)
+
             create_project_btn.click(
                 create_project,
                 inputs=[project_name, project_description, active_project],
-                outputs=[
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                    create_project_status,
-                ],
+                outputs=refresh_outputs + [create_project_status],
             )
+
             save_reference_btn.click(
                 save_reference,
                 inputs=[active_project, reference_consent, reference_name, reference_audio, reference_text],
-                outputs=[
-                    reference_text,
-                    reference_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[reference_text, reference_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
+
             save_style_btn.click(
                 save_style,
                 inputs=[active_project, style_name, style_audio, style_text, context_notes, render_text],
-                outputs=[
-                    style_text,
-                    style_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[style_text, style_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
+
             estimate_btn.click(
                 estimate_render,
                 inputs=[
@@ -854,6 +1603,7 @@ def create_studio_app():
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
+
             preview_btn.click(
                 render_preview,
                 inputs=[
@@ -869,31 +1619,11 @@ def create_studio_app():
                     remove_silence,
                     render_spectrogram,
                 ],
-                outputs=[
-                    output_audio,
-                    output_spectrogram,
-                    render_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
+
             final_btn.click(
                 render_final,
                 inputs=[
@@ -909,142 +1639,67 @@ def create_studio_app():
                     remove_silence,
                     render_spectrogram,
                 ],
-                outputs=[
-                    output_audio,
-                    output_spectrogram,
-                    render_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
+
             batch_submit_btn.click(
                 submit_batch,
                 inputs=[active_project, batch_reference, batch_style, batch_mode, batch_use_style, batch_context, batch_scripts],
-                outputs=[
-                    batch_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[batch_status] + refresh_outputs,
             )
+
             cancel_job_btn.click(
                 cancel_job,
                 inputs=[active_project, cancel_job_choice],
-                outputs=[
-                    batch_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[batch_status] + refresh_outputs,
             )
+
             compare_btn.click(
                 compare_takes,
                 inputs=[take_a, take_b],
                 outputs=[compare_audio_a, compare_meta_a, compare_audio_b, compare_meta_b],
             )
+
             export_btn.click(export_take, inputs=[export_take_choice], outputs=[export_file, export_status])
+
             save_settings_btn.click(
                 save_settings,
-                inputs=[profile_choice, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
-                outputs=[system_profile_settings, settings_status],
+                inputs=[active_project, profile_choice, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
+                outputs=refresh_outputs + [settings_status, trained_page_status],
             )
+
             detect_checkpoint_btn.click(
-                detect_checkpoint,
-                outputs=[checkpoint_path, settings_status],
+                detect_checkpoint_widgets,
+                outputs=[checkpoint_path, trained_checkpoint_choice, settings_status, trained_page_status],
             )
+
+            trained_detect_checkpoint_btn.click(
+                detect_checkpoint_widgets,
+                outputs=[checkpoint_path, trained_checkpoint_choice, settings_status, trained_page_status],
+            )
+
+            trained_apply_btn.click(
+                apply_trained_checkpoint,
+                inputs=[active_project, trained_checkpoint_choice, trained_use_ema],
+                outputs=refresh_outputs + [trained_page_status, settings_status],
+            )
+
+            trained_base_btn.click(
+                switch_to_base_model,
+                inputs=[active_project],
+                outputs=refresh_outputs + [trained_page_status, settings_status],
+            )
+
             save_rule_btn.click(
                 save_rule,
                 inputs=[active_project, rule_source, rule_replacement],
-                outputs=[
-                    rule_status,
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
+                outputs=[rule_status] + refresh_outputs,
             )
-            app.load(
-                project_updates,
-                outputs=[
-                    active_project,
-                    project_summary,
-                    reference_choice,
-                    style_choice,
-                    batch_reference,
-                    batch_style,
-                    references_table,
-                    styles_table,
-                    assets_table,
-                    jobs_table,
-                    batch_jobs_table,
-                    rules_table,
-                    take_a,
-                    take_b,
-                    export_take_choice,
-                    cancel_job_choice,
-                    system_profile_create,
-                ],
-            )
+
+            app.load(project_updates, outputs=refresh_outputs)
             app.load(service.warm_profile_if_needed, outputs=[render_status])
-            app.load(lambda: json.dumps(service.system_profile(), indent=2), outputs=[system_profile_settings])
             app.unload(service.maybe_unload_idle_engine)
 
     return app
