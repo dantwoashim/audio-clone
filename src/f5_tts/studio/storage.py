@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -8,6 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from f5_tts.studio.paths import StudioPaths
+
+
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -46,10 +50,33 @@ class StudioStore:
             return None
         return dict(row)
 
+    @staticmethod
+    def _content_hash(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        if column not in self._table_columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
     def ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     slug TEXT NOT NULL UNIQUE,
@@ -115,7 +142,31 @@ class StudioStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_reference_voices_project_kind_updated
+                    ON reference_voices(project_id, kind, updated_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_pronunciation_rules_project_source
+                    ON pronunciation_rules(project_id, source);
+                CREATE INDEX IF NOT EXISTS idx_generation_jobs_project_status_updated
+                    ON generation_jobs(project_id, status, updated_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_audio_assets_project_kind_created
+                    ON audio_assets(project_id, kind, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_audio_assets_job_created
+                    ON audio_assets(job_id, created_at DESC, id DESC);
                 """
+            )
+            self._ensure_column(conn, "reference_voices", "content_hash", "TEXT")
+            self._ensure_column(conn, "audio_assets", "content_hash", "TEXT")
+            now = utc_now()
+            conn.execute(
+                """
+                INSERT INTO schema_meta (key, value, updated_at)
+                VALUES ('schema_version', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (str(SCHEMA_VERSION), now),
             )
 
     def ensure_default_project(self) -> dict:
@@ -204,8 +255,8 @@ class StudioStore:
             cursor = conn.execute(
                 """
                 INSERT INTO reference_voices (
-                    project_id, kind, name, audio_path, transcript, analysis_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    project_id, kind, name, audio_path, transcript, analysis_json, content_hash, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -214,6 +265,7 @@ class StudioStore:
                     stored_audio_path,
                     transcript.strip(),
                     self._dumps(analysis),
+                    self._content_hash(stored_audio_path),
                     now,
                     now,
                 ),
@@ -372,14 +424,40 @@ class StudioStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO audio_assets (project_id, job_id, kind, label, path, duration_seconds, metadata_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO audio_assets (
+                    project_id, job_id, kind, label, path, duration_seconds, metadata_json, content_hash, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, job_id, kind, label, path, duration_seconds, self._dumps(metadata), now),
+                (
+                    project_id,
+                    job_id,
+                    kind,
+                    label,
+                    path,
+                    duration_seconds,
+                    self._dumps(metadata),
+                    self._content_hash(path),
+                    now,
+                ),
             )
             asset_id = int(cursor.lastrowid)
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
         return self.get_audio_asset(asset_id)
+
+    def save_source_asset(self, project_id: int, label: str, audio_path: str, metadata: dict) -> dict:
+        project = self.get_project_summary(project_id)
+        stored_audio_path = self._copy_audio(project["slug"], "sources", label, audio_path)
+        duration_seconds = metadata.get("duration_seconds")
+        return self.save_audio_asset(
+            project_id=project_id,
+            job_id=None,
+            kind="source",
+            label=label.strip(),
+            path=stored_audio_path,
+            duration_seconds=duration_seconds,
+            metadata=metadata,
+        )
 
     def get_audio_asset(self, asset_id: int) -> dict:
         with self._connect() as conn:

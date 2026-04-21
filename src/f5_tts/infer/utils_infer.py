@@ -3,6 +3,7 @@
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
@@ -12,6 +13,7 @@ import hashlib
 import re
 import tempfile
 from importlib.resources import files
+from pathlib import Path
 
 import matplotlib
 
@@ -32,8 +34,10 @@ from f5_tts.model import CFM
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 
-_ref_audio_cache = {}
-_ref_text_cache = {}
+_ref_audio_cache: OrderedDict[tuple[str, int, int], str] = OrderedDict()
+_ref_text_cache: OrderedDict[tuple[tuple[str, int, int], str], str] = OrderedDict()
+_MAX_PREPARED_REFERENCE_CACHE = 12
+_MAX_TRANSCRIPT_CACHE = 24
 
 device = (
     "cuda"
@@ -63,8 +67,13 @@ cfg_strength = 2.0
 sway_sampling_coef = -1.0
 speed = 1.0
 fix_duration = None
+_TIMING_TOKEN_PATTERN = re.compile(r"[\u3400-\u9FFF]|[A-Za-z0-9']+|[^\s]", re.UNICODE)
 
 # -----------------------------------------
+
+
+def text_timing_units(text):
+    return len(_TIMING_TOKEN_PATTERN.findall(text.strip()))
 
 
 # chunk text into smaller pieces
@@ -89,7 +98,7 @@ def chunk_text(text, max_chars=135):
     for sentence in sentences:
         if not sentence:
             continue
-        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+        if text_timing_units(current_chunk) + text_timing_units(sentence) <= max_chars:
             current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
         else:
             if current_chunk:
@@ -148,9 +157,10 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=dev
 # load asr pipeline
 
 asr_pipe = None
+asr_pipe_model = None
 
 
-def initialize_asr_pipeline(device: str = device, dtype=None):
+def initialize_asr_pipeline(device: str = device, dtype=None, model_name: str | None = None):
     if dtype is None:
         dtype = (
             torch.float16
@@ -160,21 +170,41 @@ def initialize_asr_pipeline(device: str = device, dtype=None):
             else torch.float32
         )
     global asr_pipe
+    global asr_pipe_model
+    model_name = model_name or (
+        "openai/whisper-small"
+        if str(device).startswith("mps")
+        else "openai/whisper-large-v3-turbo"
+    )
+    if asr_pipe is not None and asr_pipe_model == model_name:
+        return asr_pipe
     asr_pipe = pipeline(
         "automatic-speech-recognition",
-        model="openai/whisper-large-v3-turbo",
+        model=model_name,
         torch_dtype=dtype,
         device=device,
     )
+    asr_pipe_model = model_name
+    return asr_pipe
+
+
+def unload_asr_pipeline():
+    global asr_pipe
+    global asr_pipe_model
+    had_pipeline = asr_pipe is not None
+    asr_pipe = None
+    asr_pipe_model = None
+    if had_pipeline and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # transcribe
 
 
-def transcribe(ref_audio, language=None):
+def transcribe(ref_audio, language=None, model_name: str | None = None):
     global asr_pipe
-    if asr_pipe is None:
-        initialize_asr_pipeline(device=device)
+    if asr_pipe is None or asr_pipe_model != (model_name or asr_pipe_model):
+        initialize_asr_pipeline(device=device, model_name=model_name)
     return asr_pipe(
         ref_audio,
         chunk_length_s=30,
@@ -227,7 +257,8 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True):
         model.load_state_dict(checkpoint["model_state_dict"])
 
     del checkpoint
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return model.to(device)
 
@@ -292,27 +323,64 @@ def remove_silence_edges(audio, silence_threshold=-42):
     return trimmed_audio
 
 
+def _reference_signature(ref_audio_orig: str) -> tuple[str, int, int]:
+    path = Path(ref_audio_orig).expanduser()
+    stat = path.stat()
+    return str(path.resolve()), stat.st_size, stat.st_mtime_ns
+
+
+def _reference_cache_dir() -> Path:
+    configured = os.environ.get("F5_TTS_PREPARED_REF_DIR", "")
+    if configured:
+        root = Path(configured).expanduser()
+    else:
+        root = Path(tempfile.gettempdir()) / "f5_tts_prepared_refs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _remember_prepared_reference(signature: tuple[str, int, int], prepared_path: str) -> None:
+    _ref_audio_cache[signature] = prepared_path
+    _ref_audio_cache.move_to_end(signature)
+    while len(_ref_audio_cache) > _MAX_PREPARED_REFERENCE_CACHE:
+        _, expired_path = _ref_audio_cache.popitem(last=False)
+        try:
+            Path(expired_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _remember_transcript(signature: tuple[str, int, int], transcript: str, model_name: str | None = None) -> None:
+    cache_key = (signature, model_name or "")
+    _ref_text_cache[cache_key] = transcript
+    _ref_text_cache.move_to_end(cache_key)
+    while len(_ref_text_cache) > _MAX_TRANSCRIPT_CACHE:
+        _ref_text_cache.popitem(last=False)
+
+
 # preprocess reference audio and text
 
 
-def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
+def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print, transcription_model: str | None = None):
     show_info("Converting audio...")
-
-    # Compute a hash of the reference audio file
-    with open(ref_audio_orig, "rb") as audio_file:
-        audio_data = audio_file.read()
-        audio_hash = hashlib.md5(audio_data).hexdigest()
+    signature = _reference_signature(ref_audio_orig)
+    cache_dir = _reference_cache_dir()
+    prepared_name = f"{hashlib.sha1(repr(signature).encode('utf-8')).hexdigest()}.wav"
+    prepared_path = cache_dir / prepared_name
 
     global _ref_audio_cache
 
-    if audio_hash in _ref_audio_cache:
+    cached_ref_audio = _ref_audio_cache.get(signature)
+    if cached_ref_audio and Path(cached_ref_audio).exists():
         show_info("Using cached preprocessed reference audio...")
-        ref_audio = _ref_audio_cache[audio_hash]
+        ref_audio = cached_ref_audio
+        _ref_audio_cache.move_to_end(signature)
+    elif prepared_path.exists():
+        ref_audio = str(prepared_path)
+        _remember_prepared_reference(signature, ref_audio)
+        show_info("Using persisted preprocessed reference audio...")
 
     else:  # first pass, do preprocess
-        with tempfile.NamedTemporaryFile(suffix=".wav", **tempfile_kwargs) as f:
-            temp_path = f.name
-
         aseg = AudioSegment.from_file(ref_audio_orig)
 
         # 1. try to find long silence for clipping
@@ -346,23 +414,23 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
             show_info("Audio is over 12s, clipping short. (3)")
 
         aseg = remove_silence_edges(aseg) + AudioSegment.silent(duration=50)
-        aseg.export(temp_path, format="wav")
-        ref_audio = temp_path
-
-        # Cache the processed reference audio
-        _ref_audio_cache[audio_hash] = ref_audio
+        aseg.export(str(prepared_path), format="wav")
+        ref_audio = str(prepared_path)
+        _remember_prepared_reference(signature, ref_audio)
 
     if not ref_text.strip():
         global _ref_text_cache
-        if audio_hash in _ref_text_cache:
+        cache_key = (signature, transcription_model or "")
+        if cache_key in _ref_text_cache:
             # Use cached asr transcription
             show_info("Using cached reference text...")
-            ref_text = _ref_text_cache[audio_hash]
+            ref_text = _ref_text_cache[cache_key]
+            _ref_text_cache.move_to_end(cache_key)
         else:
             show_info("No reference text provided, transcribing reference audio...")
-            ref_text = transcribe(ref_audio)
+            ref_text = transcribe(ref_audio, model_name=transcription_model)
             # Cache the transcribed text (not caching custom ref_text, enabling users to do manual tweak)
-            _ref_text_cache[audio_hash] = ref_text
+            _remember_transcript(signature, ref_text, transcription_model)
     else:
         show_info("Using custom reference text...")
 
@@ -404,7 +472,8 @@ def infer_process(
         audio, sr = ref_audio
     else:
         audio, sr = torchaudio.load(ref_audio)
-    max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
+    ref_units = max(text_timing_units(ref_text), 1)
+    max_chars = int(ref_units / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
     for i, gen_text_i in enumerate(gen_text_batches):
         print(f"gen_text {i}", gen_text_i)
@@ -479,8 +548,9 @@ def infer_batch_process(
 
     def _infer_basic(gen_text):
         local_speed = speed
-        if len(gen_text.encode("utf-8")) < 10:
-            local_speed = 0.3
+        gen_units = max(text_timing_units(gen_text), 1)
+        if gen_units < 4:
+            local_speed = 0.45
 
         # Prepare the text
         text_list = [ref_text + gen_text]
@@ -491,9 +561,8 @@ def infer_batch_process(
             duration = int(fix_duration * target_sample_rate / hop_length)
         else:
             # Calculate duration
-            ref_text_len = len(ref_text.encode("utf-8"))
-            gen_text_len = len(gen_text.encode("utf-8"))
-            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+            ref_text_len = max(text_timing_units(ref_text), 1)
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_units / local_speed)
 
         # inference
         with torch.inference_mode():

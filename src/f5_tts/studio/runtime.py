@@ -3,14 +3,17 @@ from __future__ import annotations
 import gc
 import html
 import json
+import multiprocessing as mp
 import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -72,6 +75,11 @@ _SMALL_NUMBERS = [
     "nineteen",
 ]
 _TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+_TIMING_TOKEN_PATTERN = re.compile(r"[\u3400-\u9FFF]|[A-Za-z0-9']+|[^\s]")
+
+
+class JobCancelledError(RuntimeError):
+    pass
 
 
 def format_duration(seconds: float) -> str:
@@ -90,7 +98,7 @@ def chunk_text(text: str, max_chars: int = 135) -> list[str]:
     for sentence in sentences:
         if not sentence:
             continue
-        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+        if text_timing_units(current_chunk) + text_timing_units(sentence) <= max_chars:
             current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
         else:
             if current_chunk:
@@ -99,6 +107,10 @@ def chunk_text(text: str, max_chars: int = 135) -> list[str]:
     if current_chunk:
         chunks.append(current_chunk.strip())
     return chunks
+
+
+def text_timing_units(text: str) -> int:
+    return len(_TIMING_TOKEN_PATTERN.findall(text.strip()))
 
 
 def number_to_words(value: int) -> str:
@@ -196,7 +208,8 @@ class StudioEngine:
         self._silero_model = None
         self._last_used_at = 0.0
         self._timing_samples: list[float] = []
-        self._reference_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._reference_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self._reference_cache_limit = 8
 
     @property
     def device(self) -> str:
@@ -228,10 +241,15 @@ class StudioEngine:
         self._touch()
         return self._engine
 
-    def prepare_reference(self, ref_file: str, ref_text: str) -> dict[str, Any]:
+    def prepare_reference(self, ref_file: str, ref_text: str, transcription_model: str | None = None) -> dict[str, Any]:
         from f5_tts.infer.utils_infer import preprocess_ref_audio_text
 
-        ref_audio, prepared_text = preprocess_ref_audio_text(ref_file, ref_text, show_info=lambda *_args, **_kwargs: None)
+        ref_audio, prepared_text = preprocess_ref_audio_text(
+            ref_file,
+            ref_text,
+            show_info=lambda *_args, **_kwargs: None,
+            transcription_model=transcription_model,
+        )
         cache_key = (ref_audio, prepared_text)
         if cache_key not in self._reference_cache:
             audio, sample_rate = torchaudio.load(ref_audio)
@@ -241,6 +259,10 @@ class StudioEngine:
                 "audio": audio,
                 "sample_rate": sample_rate,
             }
+            while len(self._reference_cache) > self._reference_cache_limit:
+                self._reference_cache.popitem(last=False)
+        else:
+            self._reference_cache.move_to_end(cache_key)
         return self._reference_cache[cache_key]
 
     def warm_up(self, ckpt_file: str | None = None, use_ema: bool = True) -> None:
@@ -288,7 +310,14 @@ class StudioEngine:
         speech_ratio = 0.0 if duration == 0 else min(max(speech_seconds / duration, 0.0), 1.0)
         return speech_seconds, speech_ratio
 
-    def transcribe_audio(self, audio_path: str, language: str | None = None, backend: str = DEFAULT_ASR_BACKEND) -> tuple[str, str]:
+    def transcribe_audio(
+        self,
+        audio_path: str,
+        language: str | None = None,
+        backend: str = DEFAULT_ASR_BACKEND,
+        model_name: str | None = None,
+        keep_loaded: bool = False,
+    ) -> tuple[str, str]:
         chosen_backend = backend
         if backend == "auto":
             chosen_backend = "mlx_whisper" if self.device.startswith("mps") else "transformers"
@@ -299,22 +328,44 @@ class StudioEngine:
 
                 result = mlx_whisper.transcribe(
                     audio_path,
-                    path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                    path_or_hf_repo=model_name or "mlx-community/whisper-small",
                     language=language,
                     word_timestamps=False,
                 )
                 self._touch()
+                if not keep_loaded:
+                    release_memory()
                 return result["text"].strip(), "mlx_whisper"
             except Exception:
                 chosen_backend = "transformers"
 
-        from f5_tts.infer.utils_infer import transcribe as infer_transcribe
+        from f5_tts.infer.utils_infer import transcribe as infer_transcribe, unload_asr_pipeline
+        transformers_model = model_name
+        if not transformers_model or transformers_model.startswith("mlx-community/"):
+            if transformers_model and "small" in transformers_model:
+                transformers_model = "openai/whisper-small"
+            elif transformers_model and "medium" in transformers_model:
+                transformers_model = "openai/whisper-medium"
+            else:
+                transformers_model = "openai/whisper-large-v3-turbo"
 
-        transcript = infer_transcribe(audio_path, language=language)
-        self._touch()
-        return transcript, "transformers"
+        try:
+            transcript = infer_transcribe(audio_path, language=language, model_name=transformers_model)
+            self._touch()
+            return transcript, "transformers"
+        finally:
+            if not keep_loaded:
+                unload_asr_pipeline()
+                release_memory()
 
-    def analyze_reference(self, audio_path: str, transcript: str = "", backend: str = DEFAULT_ASR_BACKEND) -> ReferenceAnalysis:
+    def analyze_reference(
+        self,
+        audio_path: str,
+        transcript: str = "",
+        backend: str = DEFAULT_ASR_BACKEND,
+        model_name: str | None = None,
+        keep_loaded: bool = False,
+    ) -> ReferenceAnalysis:
         audio, sample_rate = torchaudio.load(audio_path)
         mono_audio = audio.mean(dim=0).float()
         duration_seconds = mono_audio.shape[-1] / sample_rate
@@ -335,7 +386,12 @@ class StudioEngine:
         transcript_text = transcript.strip()
         used_backend = "manual"
         if not transcript_text:
-            transcript_text, used_backend = self.transcribe_audio(audio_path, backend=backend)
+            transcript_text, used_backend = self.transcribe_audio(
+                audio_path,
+                backend=backend,
+                model_name=model_name,
+                keep_loaded=keep_loaded,
+            )
 
         warnings: list[str] = []
         notes: list[str] = [
@@ -379,19 +435,26 @@ class StudioEngine:
         context_notes: str,
         gen_text: str = "",
         backend: str = DEFAULT_ASR_BACKEND,
+        model_name: str | None = None,
+        keep_loaded: bool = False,
     ) -> StyleAnalysis:
         transcript = style_text.strip()
         if not transcript:
-            transcript, _ = self.transcribe_audio(style_audio_path, backend=backend)
+            transcript, _ = self.transcribe_audio(
+                style_audio_path,
+                backend=backend,
+                model_name=model_name,
+                keep_loaded=keep_loaded,
+            )
 
         audio, sample_rate = torchaudio.load(style_audio_path)
         duration_seconds = audio.shape[-1] / sample_rate
-        style_text_len = max(len(transcript.encode("utf-8")), 1)
+        style_text_len = max(text_timing_units(transcript), 1)
         style_rate = style_text_len / max(duration_seconds, 0.1)
-        recommended_speed = min(max(style_rate / 12.5, 0.72), 1.28)
+        recommended_speed = min(max(style_rate / 2.7, 0.72), 1.22)
         suggested_fix_duration = None
         if gen_text.strip():
-            target_text_len = max(len(gen_text.encode("utf-8")), 1)
+            target_text_len = max(text_timing_units(gen_text), 1)
             suggested_fix_duration = duration_seconds * (target_text_len / style_text_len)
 
         recommended_speed, suggested_fix_duration, matched = apply_context_modifiers(
@@ -457,15 +520,16 @@ class StudioEngine:
         sample_rate = prepared["sample_rate"]
         duration_seconds = audio.shape[-1] / sample_rate
         ref_audio_len = int(duration_seconds * target_sample_rate / hop_length)
-        ref_text_len = max(len(prepared["ref_text"].encode("utf-8")), 1)
+        ref_text_len = max(text_timing_units(prepared["ref_text"]), 1)
         max_chars = int(ref_text_len / max(duration_seconds, 0.1) * (22 - duration_seconds) * speed)
         max_chars = max(max_chars, 60)
         text_batches = chunk_text(text, max_chars=max_chars)
 
         predicted_output_seconds = 0.0
         for chunk in text_batches:
-            local_speed = speed if len(chunk.encode("utf-8")) >= 10 else min(speed, 0.3)
-            duration = ref_audio_len + int(ref_audio_len / ref_text_len * len(chunk.encode("utf-8")) / local_speed)
+            chunk_units = max(text_timing_units(chunk), 1)
+            local_speed = speed if chunk_units >= 4 else min(speed, 0.45)
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * chunk_units / local_speed)
             frames = max(duration - ref_audio_len, 0)
             predicted_output_seconds += frames * hop_length / target_sample_rate
 
@@ -509,8 +573,8 @@ class StudioEngine:
                 speed = float(analysis.get("recommended_speed", speed))
             suggested_fix_duration = None
             if style_duration > 0 and style_text:
-                target_text_len = max(len(normalized_text.encode("utf-8")), 1)
-                style_text_len = max(len(style_text.encode("utf-8")), 1)
+                target_text_len = max(text_timing_units(normalized_text), 1)
+                style_text_len = max(text_timing_units(style_text), 1)
                 ref_audio, ref_sr = torchaudio.load(reference["audio_path"])
                 ref_duration = ref_audio.shape[-1] / ref_sr
                 suggested_fix_duration = ref_duration + style_duration * (target_text_len / style_text_len)
@@ -609,9 +673,38 @@ class StudioEngine:
         }
 
 
+def _render_job_process(
+    paths: StudioPaths,
+    request_payload: dict[str, Any],
+    reference: dict[str, Any],
+    style: dict[str, Any] | None,
+    pronunciation_rules: list[dict[str, Any]],
+    output_dir: str,
+    engine_options: dict[str, Any],
+    result_queue: mp.Queue,
+) -> None:
+    try:
+        os.environ.setdefault("F5_TTS_PREPARED_REF_DIR", str(paths.cache / "prepared-references"))
+        store = StudioStore(paths)
+        engine = StudioEngine(store)
+        request = GenerationRequest.model_validate(request_payload)
+        result = engine.render(
+            request,
+            reference,
+            style,
+            pronunciation_rules,
+            output_dir=Path(output_dir),
+            **engine_options,
+        )
+        result_queue.put({"ok": True, "result": result})
+    except Exception as exc:  # pragma: no cover - exercised through service integration
+        result_queue.put({"ok": False, "error": str(exc)})
+
+
 class StudioService:
     def __init__(self, paths: StudioPaths | None = None):
         self.paths = paths or get_studio_paths()
+        os.environ.setdefault("F5_TTS_PREPARED_REF_DIR", str(self.paths.cache / "prepared-references"))
         self.store = StudioStore(self.paths)
         self.store.ensure_default_project()
         self.engine = StudioEngine(self.store)
@@ -621,9 +714,20 @@ class StudioService:
         self._worker_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._warm_thread: threading.Thread | None = None
+        self._last_warm_error: str | None = None
+        self._process_context = mp.get_context("spawn")
+        self._active_process: mp.Process | None = None
+        self._active_process_lock = threading.Lock()
         os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.0")
-        os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.9")
+        self._apply_profile_environment(self.get_runtime_profile_name())
+
+    def _runtime_profile(self):
+        return get_runtime_profile(self.get_runtime_profile_name())
+
+    def _apply_profile_environment(self, profile_name: str) -> None:
+        profile = get_runtime_profile(profile_name)
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(profile.mps_high_watermark_ratio)
+        os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = str(profile.mps_low_watermark_ratio)
 
     def _search_checkpoint_roots(self) -> list[Path]:
         candidates: list[Path] = []
@@ -710,9 +814,29 @@ class StudioService:
         self.engine.maybe_unload(0, force=True)
 
     def _engine_options(self) -> dict[str, Any]:
+        return self._engine_options_for_request()
+
+    def _engine_options_for_request(self, request: GenerationRequest | None = None) -> dict[str, Any]:
+        if request is None or request.checkpoint_path is None:
+            checkpoint_path = self.get_checkpoint_path() or None
+        else:
+            normalized = request.checkpoint_path.strip()
+            if normalized:
+                path = Path(normalized).expanduser()
+                if not path.exists():
+                    raise FileNotFoundError(f"Checkpoint not found: {path}")
+                checkpoint_path = str(path.resolve())
+            else:
+                checkpoint_path = None
+
+        if request is None or request.use_ema is None:
+            use_ema = self.get_use_ema()
+        else:
+            use_ema = bool(request.use_ema)
+
         return {
-            "ckpt_file": self.get_checkpoint_path() or None,
-            "use_ema": self.get_use_ema(),
+            "ckpt_file": checkpoint_path,
+            "use_ema": use_ema,
         }
 
     def get_runtime_profile_name(self) -> str:
@@ -721,6 +845,7 @@ class StudioService:
     def set_runtime_profile(self, value: str) -> None:
         profile = value if value in PROFILE_MAP else DEFAULT_PROFILE
         self.store.set_setting("runtime_profile", profile)
+        self._apply_profile_environment(profile)
         if not get_runtime_profile(profile).warm_on_start:
             self.engine.maybe_unload(0, force=True)
 
@@ -729,6 +854,15 @@ class StudioService:
 
     def set_asr_backend(self, backend: str) -> None:
         self.store.set_setting("asr_backend", backend)
+
+    def get_asr_model_name(self) -> str:
+        return self._runtime_profile().preferred_asr_model
+
+    def _effective_asr_backend(self) -> str:
+        saved = self.get_asr_backend()
+        if saved == "auto":
+            return self._runtime_profile().preferred_asr_backend
+        return saved
 
     def get_idle_unload_seconds(self) -> int:
         saved = self.store.get_setting("idle_unload_seconds")
@@ -750,13 +884,23 @@ class StudioService:
 
         def worker():
             try:
+                self._last_warm_error = None
                 self.engine.warm_up(**self._engine_options())
-            except Exception:
-                pass
+            except Exception as exc:
+                self._last_warm_error = str(exc)
 
         self._warm_thread = threading.Thread(target=worker, daemon=True)
         self._warm_thread.start()
         return "Voice engine warm-up started in the background."
+
+    def warm_engine_now(self) -> str:
+        try:
+            self._last_warm_error = None
+            self.engine.warm_up(**self._engine_options())
+            return "Voice engine is warm and ready."
+        except Exception as exc:
+            self._last_warm_error = str(exc)
+            raise
 
     def maybe_unload_idle_engine(self) -> None:
         self.engine.maybe_unload(self.get_idle_unload_seconds())
@@ -779,6 +923,9 @@ class StudioService:
     def list_assets(self, project_id: int) -> list[dict]:
         return self.store.list_audio_assets(project_id)
 
+    def list_sources(self, project_id: int) -> list[dict]:
+        return self.store.list_audio_assets(project_id, kind="source")
+
     def list_jobs(self, project_id: int | None = None) -> list[dict]:
         return self.store.list_jobs(project_id)
 
@@ -786,7 +933,14 @@ class StudioService:
         return self.store.upsert_pronunciation_rule(project_id, source, replacement)
 
     def ingest_reference(self, project_id: int, name: str, audio_path: str, transcript: str = "") -> tuple[dict, dict]:
-        analysis = self.engine.analyze_reference(audio_path, transcript, backend=self.get_asr_backend())
+        profile = self._runtime_profile()
+        analysis = self.engine.analyze_reference(
+            audio_path,
+            transcript,
+            backend=self._effective_asr_backend(),
+            model_name=self.get_asr_model_name(),
+            keep_loaded=profile.keep_asr_loaded,
+        )
         saved = self.store.save_voice_asset(
             project_id=project_id,
             kind="reference",
@@ -807,12 +961,15 @@ class StudioService:
         context_notes: str = "",
         gen_text: str = "",
     ) -> tuple[dict, dict]:
+        profile = self._runtime_profile()
         analysis = self.engine.analyze_style(
             audio_path,
             transcript,
             context_notes,
             gen_text=gen_text,
-            backend=self.get_asr_backend(),
+            backend=self._effective_asr_backend(),
+            model_name=self.get_asr_model_name(),
+            keep_loaded=profile.keep_asr_loaded,
         )
         payload = analysis.model_dump()
         payload["context_notes"] = context_notes
@@ -826,6 +983,102 @@ class StudioService:
         )
         self.maybe_unload_idle_engine()
         return saved, payload
+
+    def ingest_edit_source(
+        self,
+        project_id: int,
+        name: str,
+        audio_path: str,
+        transcript: str = "",
+    ) -> tuple[dict, dict]:
+        from f5_tts.studio.editing import align_transcript
+
+        profile = self._runtime_profile()
+        alignment = align_transcript(
+            audio_path,
+            transcript,
+            model_name=self.get_asr_model_name(),
+        )
+        audio, sample_rate = torchaudio.load(audio_path)
+        metadata = {
+            "transcript": alignment["transcript"],
+            "alignment": alignment["words"],
+            "alignment_backend": alignment["alignment_backend"],
+            "warnings": alignment.get("warnings", []),
+            "asr_transcript": alignment.get("asr_transcript", ""),
+            "duration_seconds": audio.shape[-1] / sample_rate,
+        }
+        if not profile.keep_asr_loaded:
+            release_memory()
+        asset = self.store.save_source_asset(project_id, name, audio_path, metadata)
+        return asset, metadata
+
+    def render_edit_now(
+        self,
+        *,
+        project_id: int,
+        source_asset_id: int,
+        take_name: str,
+        target_text: str,
+        replacement_text: str,
+        occurrence: int = 1,
+        preserve_timing: bool = True,
+        nfe_step: int | None = None,
+        render_spectrogram: bool = False,
+    ) -> dict:
+        from f5_tts.studio.editing import build_text_edit_plan, render_speech_edit
+
+        source_asset = self.store.get_audio_asset(source_asset_id)
+        if source_asset["project_id"] != project_id:
+            raise ValueError("Selected source asset does not belong to the active project.")
+
+        metadata = source_asset["metadata"]
+        transcript = metadata.get("transcript", "")
+        alignment = metadata.get("alignment") or []
+        if not transcript or not alignment:
+            raise ValueError("The selected source asset does not have alignment metadata yet.")
+
+        plan = build_text_edit_plan(
+            transcript,
+            alignment,
+            target_text,
+            replacement_text,
+            occurrence=occurrence,
+            preserve_timing=preserve_timing,
+        )
+        project = self.store.get_project_summary(project_id)
+        output_dir = self._job_output_dir(project)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename_stem = re.sub(r"[^a-z0-9]+", "-", take_name.lower()).strip("-") or "edit"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        wav_path = output_dir / f"{timestamp}-{filename_stem}-edit.wav"
+        spec_path = output_dir / f"{timestamp}-{filename_stem}-edit.png"
+        profile = self._runtime_profile()
+        effective_nfe = nfe_step or profile.final_nfe_step
+
+        result = render_speech_edit(
+            source_asset["path"],
+            original_text=plan["original_text"],
+            edited_text=plan["edited_text"],
+            spans=plan["spans"],
+            ckpt_file=self._engine_options().get("ckpt_file") or "",
+            use_ema=self._engine_options().get("use_ema", True),
+            nfe_step=effective_nfe,
+            output_wav_path=str(wav_path),
+            output_spec_path=str(spec_path) if render_spectrogram else None,
+            preserve_timing=preserve_timing,
+        )
+        result["plan"] = plan
+        asset = self.store.save_audio_asset(
+            project_id=project_id,
+            job_id=None,
+            kind="edit",
+            label=take_name,
+            path=result["audio_path"],
+            duration_seconds=result["duration_seconds"],
+            metadata=result,
+        )
+        return {"asset_id": asset["id"], **result}
 
     def estimate(self, request: GenerationRequest) -> dict:
         reference = self.store.get_voice_asset(request.reference_id)
@@ -858,6 +1111,21 @@ class StudioService:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
+    def _finalize_completed_job(self, job_id: int, request: GenerationRequest, result: dict) -> dict:
+        asset = self.store.save_audio_asset(
+            project_id=request.project_id,
+            job_id=job_id,
+            kind=request.mode,
+            label=request.name,
+            path=result["audio_path"],
+            duration_seconds=result["duration_seconds"],
+            metadata=result,
+        )
+        final_result = {"asset_id": asset["id"], **result}
+        self.store.update_job(job_id, status="completed", result=final_result)
+        self.maybe_unload_idle_engine()
+        return self.store.get_job(job_id)
+
     def _execute_job(self, job_id: int, request: GenerationRequest) -> dict:
         job = self.store.update_job(job_id, status="running")
         project = self.store.get_project_summary(request.project_id)
@@ -870,24 +1138,62 @@ class StudioService:
             style,
             pronunciation_rules,
             output_dir=self._job_output_dir(project),
-            **self._engine_options(),
+            **self._engine_options_for_request(request),
         )
-        asset = self.store.save_audio_asset(
-            project_id=request.project_id,
-            job_id=job_id,
-            kind=request.mode,
-            label=request.name,
-            path=result["audio_path"],
-            duration_seconds=result["duration_seconds"],
-            metadata=result,
+        return self._finalize_completed_job(job_id, request, result)
+
+    def _execute_job_in_subprocess(self, job_id: int, request: GenerationRequest) -> dict:
+        self.store.update_job(job_id, status="running")
+        project = self.store.get_project_summary(request.project_id)
+        reference = self.store.get_voice_asset(request.reference_id)
+        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
+        result_queue: mp.Queue = self._process_context.Queue()
+        process = self._process_context.Process(
+            target=_render_job_process,
+            args=(
+                self.paths,
+                request.model_dump(),
+                reference,
+                style,
+                pronunciation_rules,
+                str(self._job_output_dir(project)),
+                self._engine_options_for_request(request),
+                result_queue,
+            ),
+            daemon=True,
         )
-        final_result = {
-            "asset_id": asset["id"],
-            **result,
-        }
-        self.store.update_job(job_id, status="completed", result=final_result)
-        self.maybe_unload_idle_engine()
-        return self.store.get_job(job_id)
+        with self._active_process_lock:
+            self._active_process = process
+        process.start()
+
+        try:
+            while True:
+                try:
+                    payload = result_queue.get(timeout=0.5)
+                    break
+                except queue.Empty:
+                    if job_id in self._cancelled_jobs:
+                        raise JobCancelledError("Cancelled while rendering.")
+                    if not process.is_alive() and result_queue.empty():
+                        raise RuntimeError("Render worker exited before returning a result.")
+        except JobCancelledError:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            self._cancelled_jobs.discard(job_id)
+            return self.store.update_job(job_id, status="cancelled", error_text="Cancelled while rendering.")
+        finally:
+            if process.is_alive():
+                process.join(timeout=0.1)
+            result_queue.close()
+            with self._active_process_lock:
+                self._active_process = None
+
+        process.join(timeout=5)
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("error", "Render worker failed."))
+        return self._finalize_completed_job(job_id, request, payload["result"])
 
     def render_now(self, request: GenerationRequest) -> dict:
         job = self.store.create_job(request.project_id, request.name, request.model_dump())
@@ -919,7 +1225,9 @@ class StudioService:
             self._current_job_id = job_id
             try:
                 request = GenerationRequest.model_validate(job["recipe"])
-                self._execute_job(job_id, request)
+                self._execute_job_in_subprocess(job_id, request)
+            except JobCancelledError:
+                self.store.update_job(job_id, status="cancelled", error_text="Cancelled while rendering.")
             except Exception as exc:
                 self.store.update_job(job_id, status="failed", error_text=str(exc))
             finally:
@@ -940,7 +1248,13 @@ class StudioService:
 
     def cancel_job(self, job_id: int) -> dict:
         if self._current_job_id == job_id:
-            return self.store.update_job(job_id, error_text="Cancellation requested after the job already started.")
+            self._cancelled_jobs.add(job_id)
+            with self._active_process_lock:
+                active_process = self._active_process
+            if active_process is not None and active_process.is_alive():
+                active_process.terminate()
+                active_process.join(timeout=5)
+            return self.store.update_job(job_id, status="cancelled", error_text="Cancelled while rendering.")
         self._cancelled_jobs.add(job_id)
         return self.store.update_job(job_id, status="cancelled", error_text="Cancellation requested.")
 
@@ -1002,7 +1316,8 @@ class StudioService:
             profile_label=profile.label,
             description=profile.description,
             engine_loaded=self.engine.is_loaded(),
-            asr_backend=self.get_asr_backend(),
+            asr_backend=self._effective_asr_backend(),
+            asr_model=self.get_asr_model_name(),
             device=self.engine.device,
             queue_depth=self._job_queue.qsize(),
             worker_alive=bool(self._worker and self._worker.is_alive()),
@@ -1013,6 +1328,7 @@ class StudioService:
             model_name="F5TTS_v1_Base",
             checkpoint_path=checkpoint_path or None,
             use_ema=self.get_use_ema(),
+            last_warm_error=self._last_warm_error,
         ).model_dump()
 
     def stage_upload(self, source_path: str) -> str:

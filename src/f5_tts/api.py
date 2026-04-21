@@ -1,6 +1,7 @@
 import random
 import sys
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from importlib.resources import files
 
@@ -36,17 +37,25 @@ class F5TTS:
         hf_cache_dir=None,
     ):
         model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
-        model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
-        model_arc = model_cfg.model.arch
+        self._model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
+        self._model_arc = model_cfg.model.arch
 
         self.mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
         self.target_sample_rate = model_cfg.model.mel_spec.target_sample_rate
 
+        self.model_name = model
+        self.ckpt_file = ckpt_file
+        self.vocab_file = vocab_file
         self.ode_method = ode_method
         self.use_ema = use_ema
-        self._reference_cache = {}
+        self.vocoder_local_path = vocoder_local_path
+        self.hf_cache_dir = hf_cache_dir
+        self._reference_cache: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._reference_cache_limit = 8
         self._is_warmed = False
-        self._infer_lock = threading.Lock()
+        self._infer_lock = threading.RLock()
+        self.vocoder = None
+        self.ema_model = None
 
         if device is not None:
             self.device = device
@@ -63,31 +72,53 @@ class F5TTS:
                 else "cpu"
             )
 
-        # Load models
-        self.vocoder = load_vocoder(
-            self.mel_spec_type, vocoder_local_path is not None, vocoder_local_path, self.device, hf_cache_dir
-        )
+    def _resolve_checkpoint_file(self) -> str:
+        if self.ckpt_file:
+            return self.ckpt_file
 
         repo_name, ckpt_step, ckpt_type = "F5-TTS", 1250000, "safetensors"
+        model_name = self.model_name
 
-        # override for previous models
-        if model == "F5TTS_Base":
+        if model_name == "F5TTS_Base":
             if self.mel_spec_type == "vocos":
                 ckpt_step = 1200000
             elif self.mel_spec_type == "bigvgan":
-                model = "F5TTS_Base_bigvgan"
+                model_name = "F5TTS_Base_bigvgan"
                 ckpt_type = "pt"
-        elif model == "E2TTS_Base":
+        elif model_name == "E2TTS_Base":
             repo_name = "E2-TTS"
             ckpt_step = 1200000
 
-        if not ckpt_file:
-            ckpt_file = str(
-                cached_path(f"hf://SWivid/{repo_name}/{model}/model_{ckpt_step}.{ckpt_type}", cache_dir=hf_cache_dir)
+        return str(
+            cached_path(
+                f"hf://SWivid/{repo_name}/{model_name}/model_{ckpt_step}.{ckpt_type}",
+                cache_dir=self.hf_cache_dir,
             )
-        self.ema_model = load_model(
-            model_cls, model_arc, ckpt_file, self.mel_spec_type, vocab_file, self.ode_method, self.use_ema, self.device
         )
+
+    def _ensure_loaded(self):
+        if self.vocoder is not None and self.ema_model is not None:
+            return
+        with self._infer_lock:
+            if self.vocoder is not None and self.ema_model is not None:
+                return
+            self.vocoder = load_vocoder(
+                self.mel_spec_type,
+                self.vocoder_local_path is not None,
+                self.vocoder_local_path,
+                self.device,
+                self.hf_cache_dir,
+            )
+            self.ema_model = load_model(
+                self._model_cls,
+                self._model_arc,
+                self._resolve_checkpoint_file(),
+                self.mel_spec_type,
+                self.vocab_file,
+                self.ode_method,
+                self.use_ema,
+                self.device,
+            )
 
     def prepare_reference(self, ref_file, ref_text, show_info: Callable = print):
         ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text, show_info=show_info)
@@ -100,6 +131,10 @@ class F5TTS:
                 "audio": audio,
                 "sample_rate": sr,
             }
+            while len(self._reference_cache) > self._reference_cache_limit:
+                self._reference_cache.popitem(last=False)
+        else:
+            self._reference_cache.move_to_end(cache_key)
         return self._reference_cache[cache_key]
 
     def warm_up(self, show_info: Callable = print):
@@ -109,6 +144,7 @@ class F5TTS:
         with self._infer_lock:
             if self._is_warmed:
                 return
+            self._ensure_loaded()
 
             warm_ref = str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav"))
             prepared_reference = self.prepare_reference(
@@ -164,10 +200,11 @@ class F5TTS:
         seed=None,
     ):
         if seed is None:
-            seed = random.randint(0, 2**32 - 1)
+            seed = random.randint(0, 2**31 - 1)
         seed_everything(seed)
         self.seed = seed
 
+        self._ensure_loaded()
         with self._infer_lock:
             wav, sr, spec = infer_process(
                 (prepared_reference["audio"], prepared_reference["sample_rate"]),

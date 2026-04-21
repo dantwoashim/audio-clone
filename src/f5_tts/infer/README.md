@@ -208,8 +208,13 @@ python src/f5_tts/socket_client.py
 
 ## Speech Editing
 
-To test speech editing capabilities, use the following command:
+To run alignment-first speech editing from the CLI, use:
 
 ```bash
-python src/f5_tts/infer/speech_edit.py
+python src/f5_tts/infer/speech_edit.py \
+  --audio your_recording.wav \
+  --transcript "Some call me nature, others call me mother nature." \
+  --target "mother nature" \
+  --replacement "silent witness" \
+  --output_dir tests
 ```

@@ -65,7 +65,13 @@ def parse_args():
         action="store_true",
         help="Log inferenced samples per ckpt save updates",
     )
-    parser.add_argument("--logger", type=str, default=None, choices=[None, "wandb", "tensorboard"], help="logger")
+    parser.add_argument(
+        "--logger",
+        type=str,
+        default="none",
+        choices=["none", "wandb", "tensorboard"],
+        help="Training logger backend.",
+    )
     parser.add_argument(
         "--bnb_optimizer",
         action="store_true",
@@ -85,6 +91,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.logger == "none":
+        args.logger = None
+    if Trainer is None:
+        raise RuntimeError("Training dependencies are not installed. Reinstall with `pip install -e '.[train]'`.")
 
     checkpoint_path = str(files("f5_tts").joinpath(f"../../ckpts/{args.dataset_name}"))
 

@@ -100,13 +100,19 @@ conda install ffmpeg
 > git clone https://github.com/SWivid/F5-TTS.git
 > cd F5-TTS
 > # git submodule update --init --recursive  # (optional, if use bigvgan as vocoder)
-> pip install -e .
+> pip install -e ".[studio]"
 > ```
 >
 > ### 3. Apple-Silicon helper extras (optional, recommended for the upgraded studio)
 >
 > ```bash
-> pip install -e .[apple_audio]
+> pip install -e ".[studio,apple_audio]"
+> ```
+>
+> ### 4. Training extras (optional)
+>
+> ```bash
+> pip install -e ".[train]"
 > ```
 
 ### Docker usage also available

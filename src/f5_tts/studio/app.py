@@ -472,13 +472,14 @@ HERO_HTML = f"""
     </div>
     <div class="studio-hero-aside">
       <div class="studio-hero-card">
-        <strong>Three working lanes</strong>
-        <p>Create fresh takes, audition trained snapshots, then package everything from one place instead of spelunking through raw forms.</p>
+        <strong>Four working lanes</strong>
+        <p>Create fresh takes, repair existing recordings, audition trained snapshots, then package everything from one place instead of spelunking through raw forms.</p>
       </div>
       <div class="studio-hero-card">
         <strong>What changed</strong>
         <ul>
           <li>Clearer creation flow</li>
+          <li>Alignment-first edit page</li>
           <li>Dedicated trained-voice page</li>
           <li>Checkpoint-aware runtime controls</li>
         </ul>
@@ -598,6 +599,12 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
     checkpoint_label = _current_voice_label(system_profile)
     checkpoint_path = system_profile.get("checkpoint_path")
     checkpoint_note = Path(checkpoint_path).name if checkpoint_path else "Using the shipped base checkpoint."
+    asr_model = system_profile.get("asr_model") or "auto"
+    warm_note = (
+        f"<div class=\"studio-mini\"><strong>Warm-up</strong><span>{html.escape(system_profile['last_warm_error'])}</span></div>"
+        if system_profile.get("last_warm_error")
+        else ""
+    )
     return f"""
     <section class="studio-trained-overview">
       <div class="studio-trained-copy">
@@ -618,6 +625,11 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
           <strong>Engine</strong>
           <span>{"Warm" if system_profile.get("engine_loaded") else "Cold"}</span>
         </div>
+        <div class="studio-mini">
+          <strong>ASR</strong>
+          <span>{html.escape(asr_model)}</span>
+        </div>
+        {warm_note}
       </div>
     </section>
     """
@@ -703,6 +715,47 @@ def _checkpoint_choice_pairs(paths: list[str]) -> list[tuple[str, str]]:
         else:
             label = checkpoint_name
         choices.append((label, checkpoint_path))
+    return choices
+
+
+def _serialize_voice_model(checkpoint_path: str | None, use_ema: bool) -> str:
+    return json.dumps({"checkpoint_path": checkpoint_path or "", "use_ema": bool(use_ema)}, sort_keys=True)
+
+
+def _deserialize_voice_model(value: str | None) -> tuple[str | None, bool | None]:
+    if not value:
+        return None, None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None, None
+    checkpoint_path = str(payload.get("checkpoint_path", "") or "").strip() or ""
+    use_ema = payload.get("use_ema")
+    return checkpoint_path, None if use_ema is None else bool(use_ema)
+
+
+def _voice_model_choices(system_profile: dict, checkpoint_choices: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    choices: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, checkpoint_path: str | None, use_ema: bool) -> None:
+        value = _serialize_voice_model(checkpoint_path, use_ema)
+        if value in seen:
+            return
+        seen.add(value)
+        choices.append((label, value))
+
+    current_label = f"Current runtime · {_current_voice_label(system_profile)}"
+    add(current_label, system_profile.get("checkpoint_path"), bool(system_profile.get("use_ema", True)))
+    add("Base model · shipped", "", True)
+
+    for label, checkpoint_path in checkpoint_choices:
+        if not checkpoint_path:
+            continue
+        lowered = checkpoint_path.lower()
+        inferred_use_ema = "noema" not in lowered
+        add(f"Checkpoint · {label}", checkpoint_path, inferred_use_ema)
+
     return choices
 
 
@@ -829,15 +882,18 @@ def create_studio_app():
         references = project_detail["references"]
         styles = project_detail["styles"]
         assets = project_detail["assets"]
+        sources = [asset for asset in assets if asset["kind"] == "source"]
         jobs = project_detail["jobs"]
         rules = project_detail["pronunciation_rules"]
         system_profile = service.system_profile()
 
         reference_choices = _choice_pairs(references)
         style_choices = [("No style prompt", 0)] + _choice_pairs(styles)
+        source_choices = _choice_pairs(sources, label_key="label")
         asset_choices = _choice_pairs(assets, label_key="label")
         job_choices = [(f"{job['id']} · {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}]
         checkpoint_choices = _checkpoint_choice_pairs(service.list_checkpoint_candidates())
+        voice_model_choices = _voice_model_choices(system_profile, checkpoint_choices)
         trained_payload = _discover_trained_payload(system_profile, checkpoint_choices)
         current_checkpoint = system_profile.get("checkpoint_path") or ""
         current_use_ema = bool(system_profile.get("use_ema", True))
@@ -850,6 +906,10 @@ def create_studio_app():
             "reference_value": _dropdown_value(reference_choices),
             "style_choices": style_choices,
             "style_value": 0,
+            "source_choices": source_choices,
+            "source_value": _dropdown_value(source_choices),
+            "voice_model_choices": voice_model_choices,
+            "voice_model_value": voice_model_choices[0][1] if voice_model_choices else _serialize_voice_model("", True),
             "reference_rows": _reference_rows(references),
             "style_rows": _style_rows(styles),
             "asset_rows": _asset_rows(assets),
@@ -884,6 +944,10 @@ def create_studio_app():
             gr.update(choices=state["style_choices"], value=state["style_value"]),
             gr.update(choices=state["reference_choices"], value=state["reference_value"]),
             gr.update(choices=state["style_choices"], value=state["style_value"]),
+            gr.update(choices=state["reference_choices"], value=state["reference_value"]),
+            gr.update(choices=state["style_choices"], value=state["style_value"]),
+            gr.update(choices=state["source_choices"], value=state["source_value"]),
+            gr.update(choices=state["voice_model_choices"], value=state["voice_model_value"]),
             state["reference_rows"],
             state["style_rows"],
             state["asset_rows"],
@@ -950,6 +1014,22 @@ def create_studio_app():
         )
         return (analysis["transcript"], summary) + refresh
 
+    def save_edit_source(project_id: int, name: str, source_audio: str, source_text: str):
+        if not project_id:
+            raise gr.Error("Select a project first.")
+        if not source_audio:
+            raise gr.Error("Upload the source audio you want to edit first.")
+        staged = service.stage_upload(source_audio)
+        saved, metadata = service.ingest_edit_source(project_id, name or "Editable Source", staged, source_text)
+        refresh = project_updates(project_id)
+        summary = (
+            f"Saved editable source #{saved['id']}.\n"
+            f"Transcript: {metadata['transcript']}\n"
+            f"Alignment backend: {metadata['alignment_backend']}\n"
+            f"Warnings: {', '.join(metadata['warnings']) if metadata['warnings'] else 'None'}"
+        )
+        return metadata["transcript"], summary, json.dumps(metadata["alignment"][:48], indent=2) + ("\n..." if len(metadata["alignment"]) > 48 else ""), *refresh
+
     def build_request(
         project_id: int,
         reference_id: int,
@@ -963,6 +1043,8 @@ def create_studio_app():
         nfe_step: int,
         remove_silence: bool,
         render_spectrogram: bool,
+        checkpoint_override: str | None = None,
+        use_ema_override: bool | None = None,
     ) -> GenerationRequest:
         if not project_id:
             raise gr.Error("Select a project first.")
@@ -983,6 +1065,8 @@ def create_studio_app():
             nfe_step=None if nfe_step <= 0 else int(nfe_step),
             remove_silence=remove_silence,
             render_spectrogram=render_spectrogram,
+            checkpoint_path=checkpoint_override,
+            use_ema=use_ema_override,
         )
 
     def estimate_render(
@@ -1073,6 +1157,191 @@ def create_studio_app():
     def render_final(*args):
         return render_now(*args[:5], "final", *args[5:])
 
+    def _build_voice_request(
+        project_id: int,
+        reference_id: int,
+        style_id: int,
+        model_choice: str,
+        name: str,
+        text: str,
+        mode: str,
+        use_style_prompt: bool,
+        context_notes: str,
+        speed: float,
+        nfe_step: int,
+        remove_silence: bool,
+        render_spectrogram: bool,
+    ) -> GenerationRequest:
+        checkpoint_override, use_ema_override = _deserialize_voice_model(model_choice)
+        return build_request(
+            project_id,
+            reference_id,
+            style_id,
+            name,
+            text,
+            mode,
+            use_style_prompt,
+            context_notes,
+            speed,
+            nfe_step,
+            remove_silence,
+            render_spectrogram,
+            checkpoint_override=checkpoint_override,
+            use_ema_override=use_ema_override,
+        )
+
+    def estimate_voice_render(
+        project_id: int,
+        reference_id: int,
+        style_id: int,
+        model_choice: str,
+        name: str,
+        text: str,
+        use_style_prompt: bool,
+        context_notes: str,
+        speed: float,
+        nfe_step: int,
+    ):
+        request = _build_voice_request(
+            project_id,
+            reference_id,
+            style_id,
+            model_choice,
+            name,
+            text,
+            "final",
+            use_style_prompt,
+            context_notes,
+            speed,
+            nfe_step,
+            False,
+            False,
+        )
+        estimate = service.estimate(request)
+        return (
+            f"Estimated generation time: {format_duration(estimate['estimated_generation_seconds'])}\n"
+            f"Predicted output length: {format_duration(estimate['predicted_output_seconds'])}\n"
+            f"Chunks: {estimate['chunks']}\n"
+            f"Effective speed: {estimate['effective_speed']:.2f}\n"
+            f"Queue depth: {estimate['queue_depth']}\n"
+            f"Estimate source: {estimate['confidence']}"
+        )
+
+    def render_voice_now(
+        project_id: int,
+        reference_id: int,
+        style_id: int,
+        model_choice: str,
+        name: str,
+        text: str,
+        mode: str,
+        use_style_prompt: bool,
+        context_notes: str,
+        speed: float,
+        nfe_step: int,
+        remove_silence: bool,
+        render_spectrogram: bool,
+    ):
+        request = _build_voice_request(
+            project_id,
+            reference_id,
+            style_id,
+            model_choice,
+            name,
+            text,
+            mode,
+            use_style_prompt,
+            context_notes,
+            speed,
+            nfe_step,
+            remove_silence,
+            render_spectrogram,
+        )
+        job = service.render_now(request)
+        if job["status"] != "completed":
+            raise gr.Error(job.get("error_text") or "Render failed.")
+
+        result = job["result"]
+        refresh = project_updates(project_id)
+        status = (
+            f"Voice page {mode} render complete.\n"
+            f"Take #{result['asset_id']} saved to the project library.\n"
+            f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
+            f"Output length: {format_duration(result['duration_seconds'])}"
+        )
+        return (
+            result["audio_path"],
+            result.get("spectrogram_path"),
+            status,
+        ) + refresh
+
+    def render_voice_preview(*args):
+        return render_voice_now(*args[:6], "preview", *args[6:])
+
+    def render_voice_final(*args):
+        return render_voice_now(*args[:6], "final", *args[6:])
+
+    def load_edit_source_preview(source_asset_id: int | None):
+        if not source_asset_id:
+            return "", "", None
+        asset = service.store.get_audio_asset(int(source_asset_id))
+        metadata = asset.get("metadata", {})
+        alignment = metadata.get("alignment") or []
+        preview = json.dumps(alignment[:48], indent=2)
+        if len(alignment) > 48:
+            preview += "\n..."
+        return metadata.get("transcript", ""), preview, asset["path"]
+
+    def render_edit_now(
+        project_id: int,
+        source_asset_id: int,
+        take_name: str,
+        target_text: str,
+        replacement_text: str,
+        occurrence: int,
+        preserve_timing: bool,
+        mode: str,
+        nfe_step: int,
+        render_spectrogram: bool,
+    ):
+        if not project_id:
+            raise gr.Error("Select a project first.")
+        if not source_asset_id:
+            raise gr.Error("Analyze and save an editable source first.")
+        if not target_text.strip() or not replacement_text.strip():
+            raise gr.Error("Enter both the phrase to replace and the replacement text.")
+        effective_nfe = 0 if nfe_step <= 0 else int(nfe_step)
+        if mode == "preview" and effective_nfe <= 0:
+            effective_nfe = PROFILE_MAP[service.get_runtime_profile_name()].preview_nfe_step
+        elif effective_nfe <= 0:
+            effective_nfe = PROFILE_MAP[service.get_runtime_profile_name()].final_nfe_step
+
+        result = service.render_edit_now(
+            project_id=int(project_id),
+            source_asset_id=int(source_asset_id),
+            take_name=take_name.strip() or "Speech Edit",
+            target_text=target_text,
+            replacement_text=replacement_text,
+            occurrence=max(int(occurrence), 1),
+            preserve_timing=preserve_timing,
+            nfe_step=effective_nfe,
+            render_spectrogram=render_spectrogram,
+        )
+        refresh = project_updates(project_id)
+        status = (
+            f"Edit render complete.\n"
+            f"Asset #{result['asset_id']} saved to the project library.\n"
+            f"Edited phrase: {result['plan']['target_text']} -> {result['plan']['replacement_text']}\n"
+            f"Output length: {format_duration(result['duration_seconds'])}"
+        )
+        return result["audio_path"], result.get("spectrogram_path"), json.dumps(result["plan"], indent=2), status, *refresh
+
+    def render_edit_preview(*args):
+        return render_edit_now(*args[:7], "preview", *args[7:])
+
+    def render_edit_final(*args):
+        return render_edit_now(*args[:7], "final", *args[7:])
+
     def submit_batch(
         project_id: int,
         reference_id: int,
@@ -1150,6 +1419,11 @@ def create_studio_app():
         service.set_use_ema(use_ema_value)
         refresh = project_updates(project_id)
         return refresh + ("Settings saved.", "Settings saved.")
+
+    def warm_engine(project_id: int | None):
+        message = service.warm_engine_now()
+        refresh = project_updates(project_id)
+        return refresh + (message, message)
 
     def apply_trained_checkpoint(project_id: int, checkpoint_value: str, use_ema_value: bool):
         service.set_checkpoint_path(checkpoint_value)
@@ -1289,6 +1563,150 @@ def create_studio_app():
                             runtime_snapshot = gr.HTML(value=initial_state["runtime_snapshot"])
                             output_audio = gr.Audio(label="Latest output", type="filepath", elem_classes=["studio-audio-card"])
                             output_spectrogram = gr.Image(label="Spectrogram")
+
+                with gr.Tab("Edit"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Editing",
+                            "Alignment-first speech editing.",
+                            "Import an existing recording, confirm the transcript, choose the words to replace by text, then render a localized edit instead of hand-trimming time ranges.",
+                        )
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Editable source")
+                            edit_source_name = gr.Textbox(label="Source name", value="Editable Source")
+                            edit_source_audio = gr.Audio(label="Source audio", type="filepath", sources=["upload", "microphone"])
+                            edit_source_text = gr.Textbox(
+                                label="Confirmed transcript",
+                                lines=6,
+                                placeholder="Paste the exact transcript when you know it. Leave blank only when you need local alignment help.",
+                            )
+                            save_edit_source_btn = gr.Button("Analyze and save source", elem_classes=["studio-secondary"])
+                            edit_source_status = gr.Textbox(label="Source status", lines=6, interactive=False)
+                            edit_source_choice = gr.Dropdown(
+                                label="Saved editable source",
+                                choices=initial_state["source_choices"],
+                                value=initial_state["source_value"],
+                            )
+                            edit_source_audio_preview = gr.Audio(
+                                label="Selected source",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                            )
+
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Edit plan")
+                            edit_take_name = gr.Textbox(label="Edited take name", value="Speech Edit")
+                            edit_target_text = gr.Textbox(
+                                label="Replace this phrase",
+                                placeholder="Exact words from the transcript to replace",
+                            )
+                            edit_replacement_text = gr.Textbox(
+                                label="With this phrase",
+                                placeholder="Replacement text",
+                            )
+                            with gr.Row():
+                                edit_occurrence = gr.Number(label="Occurrence", value=1, precision=0)
+                                edit_preserve_timing = gr.Checkbox(label="Preserve original timing", value=True)
+                            with gr.Accordion("Advanced controls", open=False):
+                                edit_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                edit_render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
+                            with gr.Row():
+                                edit_preview_btn = gr.Button("Quick edit preview", elem_classes=["studio-primary"])
+                                edit_final_btn = gr.Button("Final edit render", elem_classes=["studio-primary"])
+                            edit_status = gr.Textbox(
+                                label="Edit status",
+                                lines=6,
+                                interactive=False,
+                                value="Save a source, choose the phrase to replace, and render a localized edit.",
+                            )
+
+                        with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Alignment and result")
+                            edit_alignment_preview = gr.Code(label="Word alignment preview", language="json")
+                            edit_output_audio = gr.Audio(label="Edited output", type="filepath", elem_classes=["studio-audio-card"])
+                            edit_output_spectrogram = gr.Image(label="Spectrogram")
+                            edit_plan_preview = gr.Code(label="Resolved edit plan", language="json")
+
+                with gr.Tab("Voices"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Voices",
+                            "Direct text-to-speech for saved and trained voices.",
+                            "Pick a saved reference, decide whether it speaks through the base model or a finetuned checkpoint, then render without bouncing through runtime settings.",
+                        )
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Voice route")
+                            voice_reference_choice = gr.Dropdown(
+                                label="Reference voice",
+                                choices=initial_state["reference_choices"],
+                                value=initial_state["reference_value"],
+                            )
+                            voice_model_choice = gr.Dropdown(
+                                label="Voice engine",
+                                choices=initial_state["voice_model_choices"],
+                                value=initial_state["voice_model_value"],
+                            )
+                            voice_style_choice = gr.Dropdown(
+                                label="Optional style prompt",
+                                choices=initial_state["style_choices"],
+                                value=initial_state["style_value"],
+                            )
+                            voice_use_style_prompt = gr.Checkbox(
+                                label="Use saved style prompt during generation",
+                                value=True,
+                            )
+                            voice_context_notes = gr.Textbox(
+                                label="Delivery context",
+                                lines=3,
+                                placeholder="Examples: intimate, calm narrator, urgent, trailer read, soft whisper.",
+                            )
+                            voice_take_name = gr.Textbox(label="Take name", value="Voice Page Render")
+                            voice_status = gr.Textbox(
+                                label="Voice status",
+                                interactive=False,
+                                lines=6,
+                                value="Choose a reference and voice engine, then render directly from this page.",
+                            )
+
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Text to speech")
+                            voice_preset_choice = gr.Dropdown(
+                                label="Starter preset",
+                                choices=list(SCRIPT_PRESETS.keys()),
+                                value="Product demo",
+                            )
+                            voice_load_preset_btn = gr.Button("Load preset", elem_classes=["studio-secondary"])
+                            voice_text = gr.Textbox(
+                                label="Script",
+                                lines=14,
+                                value=SCRIPT_PRESETS["Product demo"],
+                            )
+                            with gr.Accordion("Advanced controls", open=False):
+                                voice_speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
+                                voice_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                voice_remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
+                                voice_render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
+                            with gr.Row():
+                                voice_estimate_btn = gr.Button("Estimate runtime", elem_classes=["studio-secondary"])
+                                voice_preview_btn = gr.Button("Quick preview", elem_classes=["studio-primary"])
+                                voice_final_btn = gr.Button("Final render", elem_classes=["studio-primary"])
+
+                        with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Latest voice output")
+                            voice_output_audio = gr.Audio(
+                                label="Direct TTS output",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                            )
+                            voice_output_spectrogram = gr.Image(label="Spectrogram")
+                            gr.Markdown(
+                                "This page is the fast lane: reference voice plus checkpoint plus text, with no detour through global settings.",
+                                elem_classes=["studio-muted-note"],
+                            )
 
                 with gr.Tab("Trained Voice"):
                     gr.HTML(
@@ -1509,6 +1927,7 @@ def create_studio_app():
                             use_ema = gr.Checkbox(label="Use EMA weights", value=initial_state["current_use_ema"])
                             with gr.Row():
                                 detect_checkpoint_btn = gr.Button("Detect latest checkpoint", elem_classes=["studio-secondary"])
+                                warm_engine_btn = gr.Button("Warm engine now", elem_classes=["studio-secondary"])
                                 save_settings_btn = gr.Button("Save runtime settings", elem_classes=["studio-primary"])
                             settings_status = gr.Textbox(label="Settings status", interactive=False)
                         with gr.Column(scale=7, elem_classes=["studio-panel", "studio-stack"]):
@@ -1534,6 +1953,10 @@ def create_studio_app():
                 style_choice,
                 batch_reference,
                 batch_style,
+                voice_reference_choice,
+                voice_style_choice,
+                edit_source_choice,
+                voice_model_choice,
                 references_table,
                 styles_table,
                 assets_table,
@@ -1559,6 +1982,7 @@ def create_studio_app():
             ]
 
             load_preset_btn.click(load_preset, inputs=[preset_choice], outputs=[render_text])
+            voice_load_preset_btn.click(load_preset, inputs=[voice_preset_choice], outputs=[voice_text])
 
             refresh_btn.click(project_updates, inputs=[active_project], outputs=refresh_outputs)
             active_project.change(project_updates, inputs=[active_project], outputs=refresh_outputs)
@@ -1583,6 +2007,20 @@ def create_studio_app():
                 outputs=[style_text, style_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
+            )
+
+            save_edit_source_btn.click(
+                save_edit_source,
+                inputs=[active_project, edit_source_name, edit_source_audio, edit_source_text],
+                outputs=[edit_source_text, edit_source_status, edit_alignment_preview] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            edit_source_choice.change(
+                load_edit_source_preview,
+                inputs=[edit_source_choice],
+                outputs=[edit_source_text, edit_alignment_preview, edit_source_audio_preview],
             )
 
             estimate_btn.click(
@@ -1644,6 +2082,103 @@ def create_studio_app():
                 concurrency_id="studio_compute",
             )
 
+            voice_estimate_btn.click(
+                estimate_voice_render,
+                inputs=[
+                    active_project,
+                    voice_reference_choice,
+                    voice_style_choice,
+                    voice_model_choice,
+                    voice_take_name,
+                    voice_text,
+                    voice_use_style_prompt,
+                    voice_context_notes,
+                    voice_speed,
+                    voice_nfe_step,
+                ],
+                outputs=[voice_status],
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            voice_preview_btn.click(
+                render_voice_preview,
+                inputs=[
+                    active_project,
+                    voice_reference_choice,
+                    voice_style_choice,
+                    voice_model_choice,
+                    voice_take_name,
+                    voice_text,
+                    voice_use_style_prompt,
+                    voice_context_notes,
+                    voice_speed,
+                    voice_nfe_step,
+                    voice_remove_silence,
+                    voice_render_spectrogram,
+                ],
+                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            voice_final_btn.click(
+                render_voice_final,
+                inputs=[
+                    active_project,
+                    voice_reference_choice,
+                    voice_style_choice,
+                    voice_model_choice,
+                    voice_take_name,
+                    voice_text,
+                    voice_use_style_prompt,
+                    voice_context_notes,
+                    voice_speed,
+                    voice_nfe_step,
+                    voice_remove_silence,
+                    voice_render_spectrogram,
+                ],
+                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            edit_preview_btn.click(
+                render_edit_preview,
+                inputs=[
+                    active_project,
+                    edit_source_choice,
+                    edit_take_name,
+                    edit_target_text,
+                    edit_replacement_text,
+                    edit_occurrence,
+                    edit_preserve_timing,
+                    edit_nfe_step,
+                    edit_render_spectrogram,
+                ],
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            edit_final_btn.click(
+                render_edit_final,
+                inputs=[
+                    active_project,
+                    edit_source_choice,
+                    edit_take_name,
+                    edit_target_text,
+                    edit_replacement_text,
+                    edit_occurrence,
+                    edit_preserve_timing,
+                    edit_nfe_step,
+                    edit_render_spectrogram,
+                ],
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
             batch_submit_btn.click(
                 submit_batch,
                 inputs=[active_project, batch_reference, batch_style, batch_mode, batch_use_style, batch_context, batch_scripts],
@@ -1668,6 +2203,14 @@ def create_studio_app():
                 save_settings,
                 inputs=[active_project, profile_choice, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
                 outputs=refresh_outputs + [settings_status, trained_page_status],
+            )
+
+            warm_engine_btn.click(
+                warm_engine,
+                inputs=[active_project],
+                outputs=refresh_outputs + [settings_status, trained_page_status],
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
             )
 
             detect_checkpoint_btn.click(

@@ -46,7 +46,7 @@ class StudioServiceTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_ingest_reference_and_render_job(self):
-        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto"):
+        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto", **_kwargs):
             return ReferenceAnalysis(
                 transcript=transcript or "hello from the reference",
                 duration_seconds=1.5,
@@ -72,7 +72,7 @@ class StudioServiceTests(unittest.TestCase):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_test_tone(output_path, seconds=0.8)
 
-        def fake_render(request, reference, style, pronunciation_rules, output_dir):
+        def fake_render(request, reference, style, pronunciation_rules, output_dir, **_kwargs):
             return {
                 "audio_path": str(output_path),
                 "spectrogram_path": None,

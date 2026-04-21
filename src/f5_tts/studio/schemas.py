@@ -16,6 +16,18 @@ class PronunciationRuleCreate(BaseModel):
     replacement: str = Field(min_length=1, max_length=240)
 
 
+class EditRenderRequest(BaseModel):
+    project_id: int
+    source_asset_id: int
+    name: str = Field(default="Speech Edit", max_length=120)
+    target_text: str = Field(min_length=1)
+    replacement_text: str = Field(min_length=1)
+    occurrence: int = Field(default=1, ge=1)
+    preserve_timing: bool = True
+    nfe_step: int | None = None
+    render_spectrogram: bool = False
+
+
 class ReferenceAnalysis(BaseModel):
     transcript: str
     duration_seconds: float
@@ -99,6 +111,8 @@ class GenerationRequest(BaseModel):
     sway_sampling_coef: float = -1.0
     remove_silence: bool | None = None
     render_spectrogram: bool | None = None
+    checkpoint_path: str | None = None
+    use_ema: bool | None = None
 
 
 class GenerationEstimate(BaseModel):
@@ -148,6 +162,7 @@ class SystemProfileView(BaseModel):
     use_ema: bool = True
     engine_loaded: bool
     asr_backend: str
+    asr_model: str
     device: str
     queue_depth: int
     worker_alive: bool
@@ -155,3 +170,4 @@ class SystemProfileView(BaseModel):
     idle_unload_seconds: int
     root_path: str
     cache_path: str
+    last_warm_error: str | None = None

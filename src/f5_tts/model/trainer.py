@@ -6,7 +6,6 @@ import os
 
 import torch
 import torchaudio
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
@@ -18,6 +17,11 @@ from tqdm import tqdm
 from f5_tts.model import CFM
 from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
 from f5_tts.model.utils import default, exists
+
+try:
+    import wandb
+except ImportError:  # pragma: no cover - optional dependency
+    wandb = None
 
 
 # trainer
@@ -56,7 +60,7 @@ class Trainer:
     ):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
-        if logger == "wandb" and not wandb.api.api_key:
+        if logger == "wandb" and (wandb is None or not getattr(wandb.api, "api_key", None)):
             logger = None
         self.log_samples = log_samples
 
@@ -140,7 +144,8 @@ class Trainer:
 
             self.optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=learning_rate)
         else:
-            self.optimizer = AdamW(model.parameters(), lr=learning_rate, fused=True)
+            fused_supported = bool(torch.cuda.is_available() and self.accelerator.device.type == "cuda")
+            self.optimizer = AdamW(model.parameters(), lr=learning_rate, fused=fused_supported)
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
 
     @property

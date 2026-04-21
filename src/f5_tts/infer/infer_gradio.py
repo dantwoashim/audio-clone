@@ -57,9 +57,8 @@ DEFAULT_TTS_MODEL_CFG = [
 ]
 
 
-# load models
-
-vocoder = load_vocoder()
+# lazy-loaded shared models
+vocoder = None
 
 
 def load_f5tts():
@@ -87,12 +86,42 @@ def load_custom(ckpt_path: str, vocab_path="", model_cfg=None):
     return load_model(DiT, model_cfg, ckpt_path, vocab_file=vocab_path)
 
 
-F5TTS_ema_model = load_f5tts()
-E2TTS_ema_model = load_e2tts() if USING_SPACES else None
+F5TTS_ema_model = None
+E2TTS_ema_model = None
 custom_ema_model, pre_custom_path = None, ""
 
 chat_model_state = None
 chat_tokenizer_state = None
+
+
+def get_vocoder():
+    global vocoder
+    if vocoder is None:
+        vocoder = load_vocoder()
+    return vocoder
+
+
+def get_tts_model(model):
+    global F5TTS_ema_model
+    global E2TTS_ema_model
+    global custom_ema_model
+    global pre_custom_path
+
+    if model == DEFAULT_TTS_MODEL:
+        if F5TTS_ema_model is None:
+            F5TTS_ema_model = load_f5tts()
+        return F5TTS_ema_model
+    if model == "E2-TTS":
+        if E2TTS_ema_model is None:
+            E2TTS_ema_model = load_e2tts()
+        return E2TTS_ema_model
+    if isinstance(model, tuple) and model[0] == "Custom":
+        assert not USING_SPACES, "Only official checkpoints allowed in Spaces."
+        if pre_custom_path != model[1]:
+            custom_ema_model = load_custom(model[1], vocab_path=model[2], model_cfg=model[3])
+            pre_custom_path = model[1]
+        return custom_ema_model
+    raise ValueError(f"Unsupported model selection: {model}")
 
 
 @gpu_decorator
@@ -159,29 +188,16 @@ def infer(
 
     ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=show_info)
 
-    if model == DEFAULT_TTS_MODEL:
-        ema_model = F5TTS_ema_model
-    elif model == "E2-TTS":
-        global E2TTS_ema_model
-        if E2TTS_ema_model is None:
-            show_info("Loading E2-TTS model...")
-            E2TTS_ema_model = load_e2tts()
-        ema_model = E2TTS_ema_model
-    elif isinstance(model, tuple) and model[0] == "Custom":
-        assert not USING_SPACES, "Only official checkpoints allowed in Spaces."
-        global custom_ema_model, pre_custom_path
-        if pre_custom_path != model[1]:
-            show_info("Loading Custom TTS model...")
-            custom_ema_model = load_custom(model[1], vocab_path=model[2], model_cfg=model[3])
-            pre_custom_path = model[1]
-        ema_model = custom_ema_model
+    if model != DEFAULT_TTS_MODEL:
+        show_info("Loading selected model...")
+    ema_model = get_tts_model(model)
 
     final_wave, final_sample_rate, combined_spectrogram = infer_process(
         ref_audio,
         ref_text,
         gen_text,
         ema_model,
-        vocoder,
+        get_vocoder(),
         cross_fade_duration=cross_fade_duration,
         nfe_step=nfe_step,
         speed=speed,

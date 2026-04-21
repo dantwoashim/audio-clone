@@ -21,14 +21,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "accelerate>=0.33.0",
-    "bitsandbytes>0.37.0; platform_machine!='arm64' and platform_system!='Darwin'",
     "cached_path",
     "click",
-    "datasets",
-    "ema_pytorch>=0.5.2",
-    "fastapi>=0.115.0",
-    "gradio>=6.0.0,<6.11",
     "hydra-core>=1.3.0",
     "librosa",
     "matplotlib",
@@ -47,14 +41,29 @@ dependencies = [
     "transformers",
     "transformers_stream_generator",
     "unidecode",
-    "uvicorn>=0.30.0",
     "vocos",
-    "wandb",
     "x_transformers>=1.31.14",
 ]
 
 [project.optional-dependencies]
+core = []
+studio = [
+    "fastapi>=0.115.0",
+    "gradio>=6.0.0,<6.11",
+    "uvicorn>=0.30.0",
+]
+train = [
+    "accelerate>=0.33.0",
+    "bitsandbytes>0.37.0; platform_machine!='arm64' and platform_system!='Darwin'",
+    "datasets",
+    "ema_pytorch>=0.5.2",
+    "wandb",
+]
 apple_audio = [
+    "mlx-whisper>=0.2.0",
+    "silero-vad>=5.1.2",
+]
+apple = [
     "mlx-whisper>=0.2.0",
     "silero-vad>=5.1.2",
 ]

@@ -16,6 +16,10 @@ class RuntimeProfile:
     trim_silence_default: bool
     keep_asr_loaded: bool
     preview_char_limit: int
+    preferred_asr_backend: str
+    preferred_asr_model: str
+    mps_high_watermark_ratio: float
+    mps_low_watermark_ratio: float
 
 
 PROFILE_MAP = {
@@ -31,32 +35,44 @@ PROFILE_MAP = {
         trim_silence_default=False,
         keep_asr_loaded=False,
         preview_char_limit=180,
+        preferred_asr_backend="mlx_whisper",
+        preferred_asr_model="mlx-community/whisper-small",
+        mps_high_watermark_ratio=0.92,
+        mps_low_watermark_ratio=0.78,
     ),
     "balanced": RuntimeProfile(
         name="balanced",
         label="Balanced",
         description="The default profile for everyday use on a 16GB M4 Air.",
         idle_unload_seconds=600,
-        warm_on_start=True,
+        warm_on_start=False,
         preview_nfe_step=22,
         final_nfe_step=32,
         render_spectrogram_default=False,
         trim_silence_default=False,
         keep_asr_loaded=False,
         preview_char_limit=240,
+        preferred_asr_backend="mlx_whisper",
+        preferred_asr_model="mlx-community/whisper-medium",
+        mps_high_watermark_ratio=1.0,
+        mps_low_watermark_ratio=0.9,
     ),
     "quality": RuntimeProfile(
         name="quality",
         label="Quality",
-        description="Maximizes output quality and keeps the engine warm longer, while still respecting a shared device.",
+        description="Maximizes output quality, but only warms the engine when you explicitly ask for it.",
         idle_unload_seconds=1200,
-        warm_on_start=True,
+        warm_on_start=False,
         preview_nfe_step=24,
         final_nfe_step=40,
         render_spectrogram_default=True,
         trim_silence_default=False,
-        keep_asr_loaded=True,
+        keep_asr_loaded=False,
         preview_char_limit=320,
+        preferred_asr_backend="mlx_whisper",
+        preferred_asr_model="mlx-community/whisper-medium",
+        mps_high_watermark_ratio=1.0,
+        mps_low_watermark_ratio=0.92,
     ),
 }
 

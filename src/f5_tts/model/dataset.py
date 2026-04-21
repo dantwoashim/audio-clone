@@ -1,4 +1,5 @@
 import json
+import os
 from importlib.resources import files
 
 import torch
@@ -282,10 +283,17 @@ def load_dataset(
         )
 
     elif dataset_type == "CustomDatasetPath":
+        preprocessed_mel = False
         try:
             train_dataset = load_from_disk(f"{dataset_name}/raw")
         except:  # noqa: E722
-            train_dataset = Dataset_.from_file(f"{dataset_name}/raw.arrow")
+            raw_arrow = f"{dataset_name}/raw.arrow"
+            mel_arrow = f"{dataset_name}/mel.arrow"
+            if os.path.exists(raw_arrow):
+                train_dataset = Dataset_.from_file(raw_arrow)
+            else:
+                train_dataset = Dataset_.from_file(mel_arrow)
+                preprocessed_mel = True
 
         with open(f"{dataset_name}/duration.json", "r", encoding="utf-8") as f:
             data_dict = json.load(f)

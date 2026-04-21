@@ -44,7 +44,7 @@ class StudioApiTests(unittest.TestCase):
         self.audio_path = self.base / "api-reference.wav"
         write_test_tone(self.audio_path)
 
-        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto"):
+        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto", **_kwargs):
             return ReferenceAnalysis(
                 transcript=transcript or "api transcript",
                 duration_seconds=1.0,

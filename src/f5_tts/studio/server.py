@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from f5_tts.infer.utils_infer import tempfile_kwargs
 from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app, studio_allowed_paths
 from f5_tts.studio.runtime import get_service
-from f5_tts.studio.schemas import GenerationRequest, ProjectCreate, PronunciationRuleCreate
+from f5_tts.studio.schemas import EditRenderRequest, GenerationRequest, ProjectCreate, PronunciationRuleCreate
 
 
 def _save_upload(service, upload: UploadFile) -> str:
@@ -70,9 +70,37 @@ def create_api_router(service) -> APIRouter:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @router.post("/edit-sources/analyze")
+    def analyze_edit_source(
+        project_id: int = Form(...),
+        name: str = Form(...),
+        transcript: str = Form(""),
+        audio: UploadFile = File(...),
+    ):
+        staged = _save_upload(service, audio)
+        try:
+            asset, metadata = service.ingest_edit_source(project_id, name, staged, transcript)
+            return {"asset": asset, "analysis": metadata}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @router.post("/generations")
     def create_generation(payload: GenerationRequest):
         return service.enqueue_generation(payload)
+
+    @router.post("/edits/render")
+    def create_edit_render(payload: EditRenderRequest):
+        return service.render_edit_now(
+            project_id=payload.project_id,
+            source_asset_id=payload.source_asset_id,
+            take_name=payload.name,
+            target_text=payload.target_text,
+            replacement_text=payload.replacement_text,
+            occurrence=payload.occurrence,
+            preserve_timing=payload.preserve_timing,
+            nfe_step=payload.nfe_step,
+            render_spectrogram=payload.render_spectrogram,
+        )
 
     @router.get("/jobs/{job_id}")
     def get_job(job_id: int):
