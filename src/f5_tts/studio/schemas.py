@@ -21,8 +21,9 @@ class EditRenderRequest(BaseModel):
     source_asset_id: int
     name: str = Field(default="Speech Edit", max_length=120)
     target_text: str = Field(min_length=1)
-    replacement_text: str = Field(min_length=1)
+    replacement_text: str = Field(default="")
     occurrence: int = Field(default=1, ge=1)
+    action: Literal["replace", "delete", "insert_before", "insert_after"] = "replace"
     preserve_timing: bool = True
     nfe_step: int | None = None
     render_spectrogram: bool = False
@@ -39,6 +40,8 @@ class ReferenceAnalysis(BaseModel):
     speech_seconds: float | None = None
     speech_ratio: float | None = None
     backend: str
+    quality_score: float | None = None
+    quality_rating: str | None = None
     warnings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -113,6 +116,7 @@ class GenerationRequest(BaseModel):
     render_spectrogram: bool | None = None
     checkpoint_path: str | None = None
     use_ema: bool | None = None
+    seed: int | None = None
 
 
 class GenerationEstimate(BaseModel):
@@ -171,3 +175,9 @@ class SystemProfileView(BaseModel):
     root_path: str
     cache_path: str
     last_warm_error: str | None = None
+    auth_mode: str = "none"
+    auth_enabled: bool = False
+    public_surface: bool = False
+    upload_limit_mb: int = 64
+    sharing_warning: str | None = None
+    public_url: str | None = None

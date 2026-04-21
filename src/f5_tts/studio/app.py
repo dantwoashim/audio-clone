@@ -9,6 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 
+from f5_tts.studio.diagnostics import reference_quality_breakdown
 from f5_tts.studio.profiles import PROFILE_MAP
 from f5_tts.studio.runtime import format_duration, get_service
 from f5_tts.studio.schemas import GenerationRequest
@@ -21,8 +22,9 @@ VOICE_PROJECT_ROOT = Path(os.environ.get("VOICE_PROJECT_ROOT", Path.home() / "vo
 def studio_allowed_paths(service=None) -> list[str]:
     allowed = set()
     if service is not None:
-        allowed.add(str(service.paths.root))
-        allowed.add(str(service.paths.cache))
+        allowed.add(str(service.paths.projects))
+        allowed.add(str(service.paths.exports))
+        allowed.add(str(service.paths.incoming))
     voice_output_root = VOICE_PROJECT_ROOT / "output"
     if voice_output_root.exists():
         allowed.add(str(voice_output_root))
@@ -184,6 +186,26 @@ APP_CSS = """
 .studio-panel h4,
 .studio-panel p:last-child {
   margin-bottom: 0;
+}
+
+.studio-warning,
+.studio-ok {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  font-weight: 600;
+}
+
+.studio-warning {
+  color: #7f2917;
+  background: rgba(176, 77, 47, 0.12);
+  border: 1px solid rgba(176, 77, 47, 0.22);
+}
+
+.studio-ok {
+  color: #0d5d4a;
+  background: rgba(15, 123, 99, 0.1);
+  border: 1px solid rgba(15, 123, 99, 0.2);
 }
 
 .studio-shell label,
@@ -472,8 +494,8 @@ HERO_HTML = f"""
     </div>
     <div class="studio-hero-aside">
       <div class="studio-hero-card">
-        <strong>Four working lanes</strong>
-        <p>Create fresh takes, repair existing recordings, audition trained snapshots, then package everything from one place instead of spelunking through raw forms.</p>
+        <strong>One studio, multiple lanes</strong>
+        <p>Create fresh takes, repair existing recordings, audition trained snapshots, diagnose quality, then package everything from one place instead of spelunking through raw forms.</p>
       </div>
       <div class="studio-hero-card">
         <strong>What changed</strong>
@@ -481,7 +503,9 @@ HERO_HTML = f"""
           <li>Clearer creation flow</li>
           <li>Alignment-first edit page</li>
           <li>Dedicated trained-voice page</li>
+          <li>Reference coach and diagnostics</li>
           <li>Checkpoint-aware runtime controls</li>
+          <li>Safer sharing and upload limits</li>
         </ul>
       </div>
     </div>
@@ -630,6 +654,49 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
           <span>{html.escape(asr_model)}</span>
         </div>
         {warm_note}
+        </div>
+    </section>
+    """
+
+
+def _sharing_snapshot_html(system_profile: dict) -> str:
+    warning = system_profile.get("sharing_warning")
+    warning_html = (
+        f"<p class=\"studio-warning\">{html.escape(warning)}</p>"
+        if warning
+        else "<p class=\"studio-ok\">Local-only mode. Nothing is exposed beyond this machine right now.</p>"
+    )
+    public_url = system_profile.get("public_url")
+    public_url_html = (
+        f"<div class=\"studio-mini\"><strong>Public URL</strong><span>{html.escape(public_url)}</span></div>"
+        if public_url
+        else ""
+    )
+    return f"""
+    <section class="studio-trained-overview">
+      <div class="studio-trained-copy">
+        <p class="studio-eyebrow">Sharing safety</p>
+        <h2>{'Protected share' if system_profile.get('auth_enabled') else 'Local by default'}</h2>
+        <p>
+          Upload limit: {html.escape(str(system_profile.get('upload_limit_mb', 64)))} MB.
+          Auth mode: {html.escape(system_profile.get('auth_mode', 'none'))}.
+        </p>
+        {warning_html}
+      </div>
+      <div class="studio-mini-grid">
+        <div class="studio-mini">
+          <strong>Surface</strong>
+          <span>{'Public' if system_profile.get('public_surface') else 'Loopback only'}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Auth</strong>
+          <span>{'Enabled' if system_profile.get('auth_enabled') else 'Disabled'}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Upload cap</strong>
+          <span>{html.escape(str(system_profile.get('upload_limit_mb', 64)))} MB</span>
+        </div>
+        {public_url_html}
       </div>
     </section>
     """
@@ -639,10 +706,12 @@ def _reference_rows(items: list[dict]) -> list[list[object]]:
     rows = []
     for item in items:
         analysis = item["analysis"]
+        quality_score = analysis.get("quality_score")
         rows.append(
             [
                 item["id"],
                 item["name"],
+                f"{float(quality_score):.1f}" if quality_score is not None else "n/a",
                 format_duration(float(analysis.get("duration_seconds", 0.0))),
                 analysis.get("backend", "manual"),
                 " | ".join(analysis.get("warnings", [])[:2]),
@@ -699,6 +768,15 @@ def _job_rows(items: list[dict]) -> list[list[object]]:
 
 def _rule_rows(items: list[dict]) -> list[list[object]]:
     return [[item["id"], item["source"], item["replacement"], item["updated_at"]] for item in items]
+
+
+def _diagnostic_reference_rows(items: list[dict]) -> list[list[object]]:
+    rows = []
+    for item in items:
+        quality = reference_quality_breakdown(item.get("analysis") or {})
+        rows.append([item["id"], item["name"], f"{quality['score']:.1f}", quality["rating"], " / ".join((quality["strengths"] or quality["issues"])[:2])])
+    rows.sort(key=lambda row: (-float(row[2]), str(row[1]).lower(), int(row[0])))
+    return rows
 
 
 def _checkpoint_choice_pairs(paths: list[str]) -> list[tuple[str, str]]:
@@ -886,6 +964,7 @@ def create_studio_app():
         jobs = project_detail["jobs"]
         rules = project_detail["pronunciation_rules"]
         system_profile = service.system_profile()
+        recommended_references = service.recommend_references(int(selected_project_id))
 
         reference_choices = _choice_pairs(references)
         style_choices = [("No style prompt", 0)] + _choice_pairs(styles)
@@ -903,7 +982,7 @@ def create_studio_app():
             "selected_project_id": selected_project_id,
             "project_overview": _project_overview_html(project_detail, system_profile),
             "reference_choices": reference_choices,
-            "reference_value": _dropdown_value(reference_choices),
+            "reference_value": (recommended_references[0]["id"] if recommended_references else _dropdown_value(reference_choices)),
             "style_choices": style_choices,
             "style_value": 0,
             "source_choices": source_choices,
@@ -915,6 +994,7 @@ def create_studio_app():
             "asset_rows": _asset_rows(assets),
             "job_rows": _job_rows(jobs),
             "rule_rows": _rule_rows(rules),
+            "diagnostic_reference_rows": _diagnostic_reference_rows(references),
             "asset_choices": asset_choices,
             "take_a_value": _dropdown_value(asset_choices),
             "take_b_value": _dropdown_value(asset_choices, 1) or _dropdown_value(asset_choices),
@@ -922,6 +1002,7 @@ def create_studio_app():
             "job_choices": job_choices,
             "job_value": _dropdown_value(job_choices),
             "runtime_snapshot": _runtime_snapshot_html(system_profile),
+            "sharing_snapshot": _sharing_snapshot_html(system_profile),
             "system_profile_json": json.dumps(system_profile, indent=2),
             "current_checkpoint": current_checkpoint,
             "current_use_ema": current_use_ema,
@@ -954,11 +1035,15 @@ def create_studio_app():
             state["job_rows"],
             state["job_rows"],
             state["rule_rows"],
+            state["diagnostic_reference_rows"],
+            gr.update(choices=state["asset_choices"], value=state["export_value"]),
+            gr.update(choices=state["reference_choices"], value=state["reference_value"]),
             gr.update(choices=state["asset_choices"], value=state["take_a_value"]),
             gr.update(choices=state["asset_choices"], value=state["take_b_value"]),
             gr.update(choices=state["asset_choices"], value=state["export_value"]),
             gr.update(choices=state["job_choices"], value=state["job_value"]),
             state["runtime_snapshot"],
+            state["sharing_snapshot"],
             state["system_profile_json"],
             gr.update(value=state["current_checkpoint"]),
             gr.update(value=state["current_use_ema"]),
@@ -995,6 +1080,7 @@ def create_studio_app():
         summary = (
             f"Saved reference #{saved['id']}.\n"
             f"Transcript: {analysis['transcript']}\n"
+            f"Quality: {analysis.get('quality_score', 'n/a')} ({analysis.get('quality_rating', 'unrated')})\n"
             f"Warnings: {', '.join(analysis['warnings']) if analysis['warnings'] else 'None'}"
         )
         return (analysis["transcript"], summary) + refresh
@@ -1043,6 +1129,7 @@ def create_studio_app():
         nfe_step: int,
         remove_silence: bool,
         render_spectrogram: bool,
+        seed: int,
         checkpoint_override: str | None = None,
         use_ema_override: bool | None = None,
     ) -> GenerationRequest:
@@ -1065,6 +1152,7 @@ def create_studio_app():
             nfe_step=None if nfe_step <= 0 else int(nfe_step),
             remove_silence=remove_silence,
             render_spectrogram=render_spectrogram,
+            seed=None if seed <= 0 else int(seed),
             checkpoint_path=checkpoint_override,
             use_ema=use_ema_override,
         )
@@ -1080,6 +1168,7 @@ def create_studio_app():
         context_notes: str,
         speed: float,
         nfe_step: int,
+        seed: int,
     ):
         request = build_request(
             project_id,
@@ -1094,6 +1183,7 @@ def create_studio_app():
             nfe_step,
             False,
             False,
+            seed,
         )
         estimate = service.estimate(request)
         return (
@@ -1118,6 +1208,7 @@ def create_studio_app():
         nfe_step: int,
         remove_silence: bool,
         render_spectrogram: bool,
+        seed: int,
     ):
         request = build_request(
             project_id,
@@ -1132,6 +1223,7 @@ def create_studio_app():
             nfe_step,
             remove_silence,
             render_spectrogram,
+            seed,
         )
         job = service.render_now(request)
         if job["status"] != "completed":
@@ -1143,7 +1235,8 @@ def create_studio_app():
             f"{mode.title()} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
             f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
-            f"Output length: {format_duration(result['duration_seconds'])}"
+            f"Output length: {format_duration(result['duration_seconds'])}\n"
+            f"Seed: {result.get('seed', 'random')}"
         )
         return (
             result["audio_path"],
@@ -1171,6 +1264,7 @@ def create_studio_app():
         nfe_step: int,
         remove_silence: bool,
         render_spectrogram: bool,
+        seed: int,
     ) -> GenerationRequest:
         checkpoint_override, use_ema_override = _deserialize_voice_model(model_choice)
         return build_request(
@@ -1186,6 +1280,7 @@ def create_studio_app():
             nfe_step,
             remove_silence,
             render_spectrogram,
+            seed,
             checkpoint_override=checkpoint_override,
             use_ema_override=use_ema_override,
         )
@@ -1201,6 +1296,7 @@ def create_studio_app():
         context_notes: str,
         speed: float,
         nfe_step: int,
+        seed: int,
     ):
         request = _build_voice_request(
             project_id,
@@ -1216,6 +1312,7 @@ def create_studio_app():
             nfe_step,
             False,
             False,
+            seed,
         )
         estimate = service.estimate(request)
         return (
@@ -1241,6 +1338,7 @@ def create_studio_app():
         nfe_step: int,
         remove_silence: bool,
         render_spectrogram: bool,
+        seed: int,
     ):
         request = _build_voice_request(
             project_id,
@@ -1256,6 +1354,7 @@ def create_studio_app():
             nfe_step,
             remove_silence,
             render_spectrogram,
+            seed,
         )
         job = service.render_now(request)
         if job["status"] != "completed":
@@ -1267,7 +1366,8 @@ def create_studio_app():
             f"Voice page {mode} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
             f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
-            f"Output length: {format_duration(result['duration_seconds'])}"
+            f"Output length: {format_duration(result['duration_seconds'])}\n"
+            f"Seed: {result.get('seed', 'random')}"
         )
         return (
             result["audio_path"],
@@ -1299,6 +1399,7 @@ def create_studio_app():
         target_text: str,
         replacement_text: str,
         occurrence: int,
+        action: str,
         preserve_timing: bool,
         mode: str,
         nfe_step: int,
@@ -1308,8 +1409,10 @@ def create_studio_app():
             raise gr.Error("Select a project first.")
         if not source_asset_id:
             raise gr.Error("Analyze and save an editable source first.")
-        if not target_text.strip() or not replacement_text.strip():
-            raise gr.Error("Enter both the phrase to replace and the replacement text.")
+        if not target_text.strip():
+            raise gr.Error("Enter the anchor phrase from the transcript.")
+        if action in {"replace", "insert_before", "insert_after"} and not replacement_text.strip():
+            raise gr.Error("Enter the replacement or inserted text for this edit action.")
         effective_nfe = 0 if nfe_step <= 0 else int(nfe_step)
         if mode == "preview" and effective_nfe <= 0:
             effective_nfe = PROFILE_MAP[service.get_runtime_profile_name()].preview_nfe_step
@@ -1323,6 +1426,7 @@ def create_studio_app():
             target_text=target_text,
             replacement_text=replacement_text,
             occurrence=max(int(occurrence), 1),
+            action=action,
             preserve_timing=preserve_timing,
             nfe_step=effective_nfe,
             render_spectrogram=render_spectrogram,
@@ -1331,16 +1435,17 @@ def create_studio_app():
         status = (
             f"Edit render complete.\n"
             f"Asset #{result['asset_id']} saved to the project library.\n"
-            f"Edited phrase: {result['plan']['target_text']} -> {result['plan']['replacement_text']}\n"
+            f"Edit action: {result['plan']['action']}\n"
+            f"Edited phrase: {result['plan']['target_text']} -> {result['plan']['replacement_text'] or '[deleted]'}\n"
             f"Output length: {format_duration(result['duration_seconds'])}"
         )
         return result["audio_path"], result.get("spectrogram_path"), json.dumps(result["plan"], indent=2), status, *refresh
 
     def render_edit_preview(*args):
-        return render_edit_now(*args[:7], "preview", *args[7:])
+        return render_edit_now(*args[:8], "preview", *args[8:])
 
     def render_edit_final(*args):
-        return render_edit_now(*args[:7], "final", *args[7:])
+        return render_edit_now(*args[:8], "final", *args[8:])
 
     def submit_batch(
         project_id: int,
@@ -1368,6 +1473,7 @@ def create_studio_app():
                 0,
                 False,
                 False,
+                0,
             )
             service.enqueue_generation(request)
         refresh = project_updates(project_id)
@@ -1394,6 +1500,30 @@ def create_studio_app():
             raise gr.Error("Choose a take from the library first.")
         bundle = service.export_asset_bundle(int(asset_id))
         return bundle, f"Export bundle created at {bundle}"
+
+    def diagnose_take(project_id: int, asset_id: int | None, reference_id: int | None, expected_text: str):
+        if not project_id:
+            raise gr.Error("Select a project first.")
+        if not asset_id:
+            raise gr.Error("Choose a saved take first.")
+        report = service.diagnose_asset(
+            int(project_id),
+            int(asset_id),
+            reference_id=None if not reference_id else int(reference_id),
+            expected_text=expected_text,
+        )
+        status = (
+            f"Diagnostics complete for take #{report['asset_id']}.\n"
+            f"Transcript backend: {report['transcript_backend']}\n"
+        )
+        if report.get("word_error_rate") is not None:
+            status += f"WER: {report['word_error_rate']:.2%}\n"
+        if report.get("char_error_rate") is not None:
+            status += f"CER: {report['char_error_rate']:.2%}\n"
+        if report.get("voice_similarity_proxy") is not None:
+            status += f"Similarity proxy: {report['voice_similarity_proxy']:.2f}\n"
+        status += f"Warnings: {', '.join(report['warnings']) if report['warnings'] else 'None'}"
+        return status, json.dumps(report, indent=2)
 
     def detect_checkpoint_widgets():
         detected = service.detect_latest_checkpoint()
@@ -1546,6 +1676,7 @@ def create_studio_app():
                             with gr.Accordion("Advanced controls", open=False):
                                 speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
                                 nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
                                 remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
                                 render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
                             with gr.Row():
@@ -1603,11 +1734,16 @@ def create_studio_app():
                                 placeholder="Exact words from the transcript to replace",
                             )
                             edit_replacement_text = gr.Textbox(
-                                label="With this phrase",
-                                placeholder="Replacement text",
+                                label="Replacement / inserted text",
+                                placeholder="Replacement text, or leave blank for delete",
                             )
                             with gr.Row():
                                 edit_occurrence = gr.Number(label="Occurrence", value=1, precision=0)
+                                edit_action = gr.Radio(
+                                    label="Edit action",
+                                    choices=["replace", "delete", "insert_before", "insert_after"],
+                                    value="replace",
+                                )
                                 edit_preserve_timing = gr.Checkbox(label="Preserve original timing", value=True)
                             with gr.Accordion("Advanced controls", open=False):
                                 edit_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
@@ -1688,6 +1824,7 @@ def create_studio_app():
                             with gr.Accordion("Advanced controls", open=False):
                                 voice_speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
                                 voice_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                voice_seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
                                 voice_remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
                                 voice_render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
                             with gr.Row():
@@ -1791,8 +1928,8 @@ def create_studio_app():
                     with gr.Row():
                         with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             references_table = gr.Dataframe(
-                                headers=["ID", "Name", "Duration", "ASR", "Warnings"],
-                                datatype=["number", "str", "str", "str", "str"],
+                                headers=["ID", "Name", "Quality", "Duration", "ASR", "Warnings"],
+                                datatype=["number", "str", "str", "str", "str", "str"],
                                 interactive=False,
                                 label="Reference library",
                                 value=initial_state["reference_rows"],
@@ -1847,6 +1984,52 @@ def create_studio_app():
                             export_file = gr.File(label="Bundle index", interactive=False)
                             compare_audio_b = gr.Audio(label="Take B audio", type="filepath", elem_classes=["studio-audio-card"])
                             compare_meta_b = gr.Code(label="Take B metadata", language="json")
+
+                with gr.Tab("Diagnostics"):
+                    gr.HTML(
+                        _page_intro_html(
+                            "Diagnostics",
+                            "Measure quality, don’t just guess.",
+                            "Use the reference coach to pick the strongest identity clip, then diagnose saved takes against expected text and reference timbre before you ship them.",
+                        )
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            diagnostic_references_table = gr.Dataframe(
+                                headers=["ID", "Name", "Score", "Rating", "Why"],
+                                datatype=["number", "str", "str", "str", "str"],
+                                interactive=False,
+                                label="Reference coach",
+                                value=initial_state["diagnostic_reference_rows"],
+                            )
+                            gr.Markdown(
+                                "Higher scores usually mean cleaner identity anchors: stable loudness, enough speech, headroom, and a safer 6-12 second window.",
+                                elem_classes=["studio-muted-note"],
+                            )
+                        with gr.Column(scale=7, elem_classes=["studio-panel", "studio-stack"]):
+                            diagnostic_asset_choice = gr.Dropdown(
+                                label="Saved take to diagnose",
+                                choices=initial_state["asset_choices"],
+                                value=initial_state["export_value"],
+                            )
+                            diagnostic_reference_choice = gr.Dropdown(
+                                label="Reference voice for similarity check",
+                                choices=initial_state["reference_choices"],
+                                value=initial_state["reference_value"],
+                            )
+                            diagnostic_expected_text = gr.Textbox(
+                                label="Expected text override",
+                                lines=5,
+                                placeholder="Leave blank to use the saved render recipe or edited transcript when available.",
+                            )
+                            diagnostic_run_btn = gr.Button("Run diagnostics", elem_classes=["studio-primary"])
+                            diagnostic_status = gr.Textbox(
+                                label="Diagnostics status",
+                                interactive=False,
+                                lines=6,
+                                value="Pick a saved take and run a local QA pass.",
+                            )
+                            diagnostic_report = gr.Code(label="Diagnostics report", language="json")
 
                 with gr.Tab("Queue"):
                     gr.HTML(
@@ -1936,6 +2119,7 @@ def create_studio_app():
                             rule_replacement = gr.Textbox(label="Replacement phrase", placeholder="bah-joo")
                             save_rule_btn = gr.Button("Save pronunciation rule", elem_classes=["studio-secondary"])
                             rule_status = gr.Textbox(label="Rule status", interactive=False)
+                            sharing_snapshot = gr.HTML(value=initial_state["sharing_snapshot"])
                             system_profile_settings = gr.Code(
                                 label="System profile",
                                 language="json",
@@ -1963,11 +2147,15 @@ def create_studio_app():
                 jobs_table,
                 batch_jobs_table,
                 rules_table,
+                diagnostic_references_table,
+                diagnostic_asset_choice,
+                diagnostic_reference_choice,
                 take_a,
                 take_b,
                 export_take_choice,
                 cancel_job_choice,
                 runtime_snapshot,
+                sharing_snapshot,
                 system_profile_settings,
                 checkpoint_path,
                 use_ema,
@@ -2036,6 +2224,7 @@ def create_studio_app():
                     context_notes,
                     speed,
                     nfe_step,
+                    seed,
                 ],
                 outputs=[render_status],
                 concurrency_limit=1,
@@ -2056,6 +2245,7 @@ def create_studio_app():
                     nfe_step,
                     remove_silence,
                     render_spectrogram,
+                    seed,
                 ],
                 outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
                 concurrency_limit=1,
@@ -2076,6 +2266,7 @@ def create_studio_app():
                     nfe_step,
                     remove_silence,
                     render_spectrogram,
+                    seed,
                 ],
                 outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
                 concurrency_limit=1,
@@ -2095,6 +2286,7 @@ def create_studio_app():
                     voice_context_notes,
                     voice_speed,
                     voice_nfe_step,
+                    voice_seed,
                 ],
                 outputs=[voice_status],
                 concurrency_limit=1,
@@ -2116,6 +2308,7 @@ def create_studio_app():
                     voice_nfe_step,
                     voice_remove_silence,
                     voice_render_spectrogram,
+                    voice_seed,
                 ],
                 outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
                 concurrency_limit=1,
@@ -2137,6 +2330,7 @@ def create_studio_app():
                     voice_nfe_step,
                     voice_remove_silence,
                     voice_render_spectrogram,
+                    voice_seed,
                 ],
                 outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
                 concurrency_limit=1,
@@ -2152,6 +2346,7 @@ def create_studio_app():
                     edit_target_text,
                     edit_replacement_text,
                     edit_occurrence,
+                    edit_action,
                     edit_preserve_timing,
                     edit_nfe_step,
                     edit_render_spectrogram,
@@ -2170,11 +2365,20 @@ def create_studio_app():
                     edit_target_text,
                     edit_replacement_text,
                     edit_occurrence,
+                    edit_action,
                     edit_preserve_timing,
                     edit_nfe_step,
                     edit_render_spectrogram,
                 ],
                 outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            diagnostic_run_btn.click(
+                diagnose_take,
+                inputs=[active_project, diagnostic_asset_choice, diagnostic_reference_choice, diagnostic_expected_text],
+                outputs=[diagnostic_status, diagnostic_report],
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )

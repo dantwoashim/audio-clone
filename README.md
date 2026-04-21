@@ -155,7 +155,7 @@ Currently supported features:
 - Basic TTS with Chunk Inference
 - Multi-Style / Multi-Speaker Generation
 - Voice Chat powered by Qwen2.5-3B-Instruct
-- Voice Studio Pro for a local-first voice-cloning workflow with projects, saved references, saved style prompts, queue-backed batch jobs, A/B compare, pronunciation rules, export bundles, and an optional FastAPI server
+- Voice Studio Pro for a local-first voice-cloning workflow with projects, saved references, saved style prompts, queue-backed batch jobs, A/B compare, pronunciation rules, diagnostics, aligned speech editing, export bundles, and an optional FastAPI server
 - [Custom inference with more language support](src/f5_tts/infer/SHARED.md)
 
 ```bash
@@ -193,6 +193,24 @@ Voice Studio Pro stores its local library outside the repo:
 That keeps project references, styles, takes, exports, and the local SQLite library portable without polluting the working tree.
 
 On Apple Silicon, the studio Settings tab can now point inference at a local finetune checkpoint such as `ckpts/<project>/model_last.pt` while keeping the base model as the fallback. If the checkpoint is very early in training, try turning off `Use EMA weights` in the same panel before judging the voice quality.
+
+Recent studio upgrades:
+
+- direct `Voices` page for text-to-speech with either the shipped base model or a saved finetune checkpoint
+- `Diagnostics` page with reference scoring and take QA against the requested transcript
+- alignment-first `Edit` page with replace, delete, insert-before, and insert-after actions
+- seed lock controls on render pages so takes can be reproduced instead of drifting every run
+
+For safer sharing, the studio now supports optional auth and upload limits through environment variables:
+
+```bash
+export F5_TTS_STUDIO_USERNAME=demo
+export F5_TTS_STUDIO_PASSWORD=change-me
+export F5_TTS_STUDIO_TOKEN=optional-api-token
+export F5_TTS_MAX_UPLOAD_MB=64
+```
+
+`F5_TTS_STUDIO_USERNAME` and `F5_TTS_STUDIO_PASSWORD` enable basic auth for the mounted server and the standalone studio launcher. `F5_TTS_STUDIO_TOKEN` can also protect the FastAPI server with a header or query token (`X-F5-TTS-Token` or `?access_token=`).
 
 <details>
 <summary>NVIDIA device docker compose file example</summary>

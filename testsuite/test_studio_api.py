@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +65,8 @@ class StudioApiTests(unittest.TestCase):
         self.client = TestClient(create_server_app(mount_studio=False, service=self.service))
 
     def tearDown(self):
+        self.client.close()
+        os.environ.pop("F5_TTS_STUDIO_TOKEN", None)
         self.temp_dir.cleanup()
 
     def test_project_and_reference_routes(self):
@@ -82,6 +85,15 @@ class StudioApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["asset"]["name"], "Lead")
         self.assertEqual(payload["analysis"]["transcript"], "api transcript")
+
+    def test_token_auth_protects_api_when_enabled(self):
+        os.environ["F5_TTS_STUDIO_TOKEN"] = "secret"
+        with TestClient(create_server_app(mount_studio=False, service=self.service)) as authed_client:
+            blocked = authed_client.get("/api/v1/projects")
+            self.assertEqual(blocked.status_code, 401)
+
+            allowed = authed_client.get("/api/v1/projects", headers={"x-f5-tts-token": "secret"})
+            self.assertEqual(allowed.status_code, 200)
 
 
 if __name__ == "__main__":

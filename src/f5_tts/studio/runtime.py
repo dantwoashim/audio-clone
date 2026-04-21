@@ -22,9 +22,11 @@ import soundfile as sf
 import torch
 import torchaudio
 
+from f5_tts.studio.diagnostics import diagnose_render, reference_quality_breakdown
 from f5_tts.studio.paths import StudioPaths, get_studio_paths
 from f5_tts.studio.profiles import DEFAULT_PROFILE, PROFILE_MAP, get_runtime_profile
 from f5_tts.studio.schemas import GenerationEstimate, GenerationRequest, ReferenceAnalysis, StyleAnalysis, SystemProfileView
+from f5_tts.studio.security import ensure_upload_within_limit, get_security_settings
 from f5_tts.studio.storage import StudioStore
 
 if TYPE_CHECKING:
@@ -413,6 +415,20 @@ class StudioEngine:
         if speech_ratio is not None and speech_ratio < 0.55:
             warnings.append("The clip contains limited detected speech relative to its duration.")
 
+        quality = reference_quality_breakdown(
+            {
+                "duration_seconds": duration_seconds,
+                "rms": rms,
+                "peak": peak,
+                "trailing_silence_seconds": trailing_silence_seconds,
+                "speech_ratio": speech_ratio,
+                "warnings": warnings,
+            }
+        )
+        notes.extend(quality["strengths"])
+        if quality["issues"] and not warnings:
+            warnings.extend(quality["issues"][:2])
+
         return ReferenceAnalysis(
             transcript=transcript_text,
             duration_seconds=duration_seconds,
@@ -424,6 +440,8 @@ class StudioEngine:
             speech_seconds=speech_seconds,
             speech_ratio=speech_ratio,
             backend=used_backend,
+            quality_score=quality["score"],
+            quality_rating=quality["rating"],
             warnings=warnings,
             notes=notes,
         )
@@ -640,6 +658,7 @@ class StudioEngine:
             progress=None,
             remove_silence=False,
             fix_duration=fix_duration,
+            seed=request.seed,
         )
         elapsed_seconds = time.perf_counter() - started_at
 
@@ -669,6 +688,7 @@ class StudioEngine:
             "text_excerpt": render_text[:240],
             "effective_speed": speed,
             "nfe_step": nfe_step,
+            "seed": getattr(engine, "seed", request.seed),
             "style_notes": style_notes,
         }
 
@@ -929,6 +949,84 @@ class StudioService:
     def list_jobs(self, project_id: int | None = None) -> list[dict]:
         return self.store.list_jobs(project_id)
 
+    def recommend_references(self, project_id: int) -> list[dict[str, Any]]:
+        recommendations: list[dict[str, Any]] = []
+        for item in self.list_references(project_id):
+            analysis = dict(item.get("analysis") or {})
+            quality = reference_quality_breakdown(analysis)
+            recommendations.append(
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "score": quality["score"],
+                    "rating": quality["rating"],
+                    "summary": " / ".join((quality["strengths"] or quality["issues"] or ["No notes available."])[:2]),
+                }
+            )
+        recommendations.sort(key=lambda row: (-row["score"], row["name"].lower(), row["id"]))
+        return recommendations
+
+    def diagnose_asset(
+        self,
+        project_id: int,
+        asset_id: int,
+        *,
+        reference_id: int | None = None,
+        expected_text: str = "",
+    ) -> dict[str, Any]:
+        asset = self.store.get_audio_asset(asset_id)
+        if int(asset["project_id"]) != int(project_id):
+            raise ValueError("The selected take does not belong to the active project.")
+
+        metadata = dict(asset.get("metadata") or {})
+        reference_audio_path = None
+        resolved_reference_id = reference_id or metadata.get("reference_id")
+        if resolved_reference_id:
+            reference = self.store.get_voice_asset(int(resolved_reference_id))
+            reference_audio_path = reference["audio_path"]
+
+        expected = expected_text.strip()
+        if not expected:
+            expected = (
+                metadata.get("requested_text")
+                or metadata.get("edited_text")
+                or metadata.get("text_excerpt")
+                or ""
+            )
+        if not expected and asset.get("job_id"):
+            try:
+                job = self.store.get_job(int(asset["job_id"]))
+                expected = str(job.get("recipe", {}).get("text", "")).strip()
+            except Exception:
+                expected = ""
+
+        profile = self._runtime_profile()
+        transcript, backend = self.engine.transcribe_audio(
+            asset["path"],
+            backend=self._effective_asr_backend(),
+            model_name=self.get_asr_model_name(),
+            keep_loaded=profile.keep_asr_loaded,
+        )
+        if not profile.keep_asr_loaded:
+            release_memory()
+
+        report = diagnose_render(
+            generated_audio_path=asset["path"],
+            expected_text=expected,
+            observed_text=transcript,
+            reference_audio_path=reference_audio_path,
+        )
+        report.update(
+            {
+                "asset_id": asset_id,
+                "asset_label": asset["label"],
+                "asset_kind": asset["kind"],
+                "reference_id": int(resolved_reference_id) if resolved_reference_id else None,
+                "transcript_backend": backend,
+            }
+        )
+        return report
+
     def save_pronunciation_rule(self, project_id: int, source: str, replacement: str) -> dict:
         return self.store.upsert_pronunciation_rule(project_id, source, replacement)
 
@@ -1022,6 +1120,7 @@ class StudioService:
         target_text: str,
         replacement_text: str,
         occurrence: int = 1,
+        action: str = "replace",
         preserve_timing: bool = True,
         nfe_step: int | None = None,
         render_spectrogram: bool = False,
@@ -1044,6 +1143,7 @@ class StudioService:
             target_text,
             replacement_text,
             occurrence=occurrence,
+            action=action,
             preserve_timing=preserve_timing,
         )
         project = self.store.get_project_summary(project_id)
@@ -1076,7 +1176,7 @@ class StudioService:
             label=take_name,
             path=result["audio_path"],
             duration_seconds=result["duration_seconds"],
-            metadata=result,
+            metadata={**result, "source_asset_id": source_asset_id, "action": action},
         )
         return {"asset_id": asset["id"], **result}
 
@@ -1112,6 +1212,16 @@ class StudioService:
         return output_dir
 
     def _finalize_completed_job(self, job_id: int, request: GenerationRequest, result: dict) -> dict:
+        result_with_provenance = {
+            **result,
+            "requested_text": request.text,
+            "reference_id": request.reference_id,
+            "style_id": request.style_id,
+            "mode": request.mode,
+            "checkpoint_path": request.checkpoint_path,
+            "use_ema": request.use_ema,
+            "seed": result.get("seed", request.seed),
+        }
         asset = self.store.save_audio_asset(
             project_id=request.project_id,
             job_id=job_id,
@@ -1119,9 +1229,9 @@ class StudioService:
             label=request.name,
             path=result["audio_path"],
             duration_seconds=result["duration_seconds"],
-            metadata=result,
+            metadata=result_with_provenance,
         )
-        final_result = {"asset_id": asset["id"], **result}
+        final_result = {"asset_id": asset["id"], **result_with_provenance}
         self.store.update_job(job_id, status="completed", result=final_result)
         self.maybe_unload_idle_engine()
         return self.store.get_job(job_id)
@@ -1311,6 +1421,7 @@ class StudioService:
         profile_name = self.get_runtime_profile_name()
         profile = get_runtime_profile(profile_name)
         checkpoint_path = self.get_checkpoint_path()
+        security = get_security_settings()
         return SystemProfileView(
             profile=profile_name,
             profile_label=profile.label,
@@ -1329,10 +1440,17 @@ class StudioService:
             checkpoint_path=checkpoint_path or None,
             use_ema=self.get_use_ema(),
             last_warm_error=self._last_warm_error,
+            auth_mode=security.auth_mode,
+            auth_enabled=security.auth_enabled,
+            public_surface=security.public_surface,
+            upload_limit_mb=security.max_upload_mb,
+            sharing_warning=security.sharing_warning,
+            public_url=security.public_url or None,
         ).model_dump()
 
     def stage_upload(self, source_path: str) -> str:
         source = Path(source_path)
+        ensure_upload_within_limit(source.stat().st_size)
         suffix = source.suffix or ".wav"
         with tempfile.NamedTemporaryFile(dir=self.paths.incoming, suffix=suffix, **tempfile_kwargs) as handle:
             staged_path = Path(handle.name)

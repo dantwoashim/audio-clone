@@ -100,6 +100,48 @@ class StudioServiceTests(unittest.TestCase):
         self.assertEqual(len(detail["references"]), 1)
         self.assertEqual(len(detail["assets"]), 1)
 
+    def test_recommend_references_and_diagnose_asset(self):
+        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto", **_kwargs):
+            return ReferenceAnalysis(
+                transcript=transcript or "hello from the reference",
+                duration_seconds=8.0,
+                sample_rate=24000,
+                channels=1,
+                rms=0.04,
+                peak=0.7,
+                trailing_silence_seconds=0.4,
+                speech_seconds=6.5,
+                speech_ratio=0.81,
+                backend="manual",
+                quality_score=91.0,
+                quality_rating="excellent",
+                warnings=[],
+                notes=["ok"],
+            )
+
+        self.service.engine.analyze_reference = fake_analysis
+        self.service.engine.transcribe_audio = lambda *args, **kwargs: ("hello from the reference", "manual")
+
+        project = self.service.list_projects()[0]
+        saved_reference, _ = self.service.ingest_reference(project["id"], "Lead", str(self.audio_path), "")
+        recommendations = self.service.recommend_references(project["id"])
+        self.assertEqual(recommendations[0]["id"], saved_reference["id"])
+
+        asset = self.service.store.save_audio_asset(
+            project_id=project["id"],
+            job_id=None,
+            kind="final",
+            label="Diagnostic Take",
+            path=str(self.audio_path),
+            duration_seconds=1.5,
+            metadata={"requested_text": "hello from the reference", "reference_id": saved_reference["id"]},
+        )
+
+        report = self.service.diagnose_asset(project["id"], asset["id"], reference_id=saved_reference["id"])
+        self.assertEqual(report["asset_id"], asset["id"])
+        self.assertEqual(report["transcript_backend"], "manual")
+        self.assertIsNotNone(report["word_error_rate"])
+
 
 if __name__ == "__main__":
     unittest.main()

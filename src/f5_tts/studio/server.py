@@ -1,27 +1,60 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
 import click
-import gradio as gr
 import uvicorn
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from f5_tts.infer.utils_infer import tempfile_kwargs
-from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app, studio_allowed_paths
 from f5_tts.studio.runtime import get_service
 from f5_tts.studio.schemas import EditRenderRequest, GenerationRequest, ProjectCreate, PronunciationRuleCreate
+from f5_tts.studio.security import (
+    ensure_upload_within_limit,
+    get_security_settings,
+    verify_basic_header,
+    verify_token,
+)
 
 
 def _save_upload(service, upload: UploadFile) -> str:
+    settings = get_security_settings()
     suffix = Path(upload.filename or "upload.wav").suffix or ".wav"
     with tempfile.NamedTemporaryFile(dir=service.paths.incoming, suffix=suffix, **tempfile_kwargs) as handle:
         target = Path(handle.name)
     with target.open("wb") as output:
-        output.write(upload.file.read())
+        total = 0
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            ensure_upload_within_limit(total, settings)
+            output.write(chunk)
     return str(target)
+
+
+def _is_authorized_request(request: Request) -> bool:
+    settings = get_security_settings()
+    if not settings.auth_enabled:
+        return True
+
+    candidate_token = request.headers.get("x-f5-tts-token") or request.query_params.get("access_token")
+    if settings.token_auth_enabled:
+        if verify_token(candidate_token, settings):
+            return True
+        if not settings.basic_auth_enabled:
+            return False
+    return verify_basic_header(request.headers.get("authorization"), settings)
+
+
+def _unauthorized_response() -> PlainTextResponse:
+    settings = get_security_settings()
+    headers = {"WWW-Authenticate": "Basic"} if settings.basic_auth_enabled else {}
+    return PlainTextResponse("Unauthorized", status_code=401, headers=headers)
 
 
 def create_api_router(service) -> APIRouter:
@@ -97,6 +130,7 @@ def create_api_router(service) -> APIRouter:
             target_text=payload.target_text,
             replacement_text=payload.replacement_text,
             occurrence=payload.occurrence,
+            action=payload.action,
             preserve_timing=payload.preserve_timing,
             nfe_step=payload.nfe_step,
             render_spectrogram=payload.render_spectrogram,
@@ -136,7 +170,17 @@ def create_api_router(service) -> APIRouter:
 
 def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
     service = service or get_service()
+    settings = get_security_settings()
     app = FastAPI(title="F5-TTS Studio", docs_url="/docs", redoc_url="/redoc")
+
+    @app.middleware("http")
+    async def studio_auth_guard(request: Request, call_next):
+        if request.url.path == "/healthz":
+            return await call_next(request)
+        if not _is_authorized_request(request):
+            return _unauthorized_response()
+        return await call_next(request)
+
     app.include_router(create_api_router(service))
 
     @app.get("/")
@@ -148,6 +192,10 @@ def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
         return {"status": "ok", "profile": service.system_profile()}
 
     if mount_studio:
+        import gradio as gr
+
+        from f5_tts.studio.app import APP_CSS, STUDIO_THEME, build_studio_app, studio_allowed_paths
+
         studio_app = build_studio_app()
         app = gr.mount_gradio_app(
             app,
@@ -158,6 +206,8 @@ def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
             pwa=True,
             theme=STUDIO_THEME,
             css=APP_CSS,
+            auth=((settings.username, settings.password) if settings.basic_auth_enabled else None),
+            max_file_size=f"{settings.max_upload_mb}mb",
         )
 
     return app
@@ -166,6 +216,8 @@ def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
 @click.option("--port", "-p", default=7862, type=int, help="Port to run the FastAPI + Gradio server on")
 @click.option("--host", "-H", default="127.0.0.1", help="Host to bind the server to")
 def main(port: int, host: str):
+    os.environ["F5_TTS_STUDIO_BIND_HOST"] = host
+    os.environ["F5_TTS_STUDIO_SHARE_ACTIVE"] = "0"
     uvicorn.run(create_server_app(), host=host, port=port, reload=False)
 
 

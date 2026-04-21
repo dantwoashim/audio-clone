@@ -8,11 +8,6 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
-from f5_tts.api import F5TTS
-from f5_tts.infer.utils_infer import save_spectrogram
-from f5_tts.model.utils import convert_char_to_pinyin
-
-
 TOKEN_PATTERN = re.compile(r"[\u3400-\u9FFF]|[A-Za-z0-9']+|[^\s]", re.UNICODE)
 
 
@@ -200,15 +195,20 @@ def build_text_edit_plan(
     replacement_text: str,
     *,
     occurrence: int = 1,
+    action: str = "replace",
     preserve_timing: bool = True,
 ) -> dict[str, Any]:
     if occurrence < 1:
         raise ValueError("Occurrence must be at least 1.")
+    if action not in {"replace", "delete", "insert_before", "insert_after"}:
+        raise ValueError(f"Unsupported edit action: {action}")
 
     transcript_tokens = tokenize_transcript(transcript)
     target_tokens = [token["normalized"] for token in tokenize_transcript(target_text) if token["normalized"]]
     if not target_tokens:
         raise ValueError("Target text is empty after tokenization.")
+    if action in {"replace", "insert_before", "insert_after"} and not replacement_text.strip():
+        raise ValueError("Replacement text is required for replace and insert actions.")
 
     normalized_transcript = [token["normalized"] for token in transcript_tokens]
     matches: list[tuple[int, int]] = []
@@ -224,25 +224,65 @@ def build_text_edit_plan(
     end_word = aligned_words[end_idx]
     char_start = transcript_tokens[start_idx]["start_char"]
     char_end = transcript_tokens[end_idx]["end_char"]
-    edited_text = transcript[:char_start] + replacement_text.strip() + transcript[char_end:]
+    replacement_value = replacement_text.strip()
+    span_start = float(start_word["start"])
+    span_end = float(end_word["end"])
+    original_text = transcript[char_start:char_end]
 
-    original_duration = max(end_word["end"] - start_word["start"], 0.05)
+    def insert_with_spacing(prefix: str, inserted: str, suffix: str) -> str:
+        value = inserted.strip()
+        if not value:
+            return prefix + suffix
+        needs_prefix_space = prefix and not prefix[-1].isspace() and value[0].isalnum()
+        needs_suffix_space = suffix and not suffix[0].isspace() and value[-1].isalnum()
+        result = prefix + (" " if needs_prefix_space else "") + value + (" " if needs_suffix_space else "") + suffix
+        result = re.sub(r"\s{2,}", " ", result)
+        result = re.sub(r"\s+([,.;!?])", r"\1", result)
+        return result
+
+    if action == "replace":
+        edited_text = transcript[:char_start] + replacement_value + transcript[char_end:]
+        original_duration = max(span_end - span_start, 0.05)
+    elif action == "delete":
+        edited_text = (transcript[:char_start] + transcript[char_end:]).strip()
+        edited_text = re.sub(r"\s{2,}", " ", edited_text)
+        edited_text = re.sub(r"\s+([,.;!?])", r"\1", edited_text)
+        replacement_value = ""
+        original_duration = max(span_end - span_start, 0.05)
+    elif action == "insert_before":
+        edited_text = insert_with_spacing(transcript[:char_start], replacement_value, transcript[char_start:])
+        previous_end = float(aligned_words[start_idx - 1]["end"]) if start_idx > 0 else max(span_start - 0.12, 0.0)
+        original_duration = max(span_start - previous_end, 0.12)
+        span_end = span_start
+        original_text = ""
+    else:
+        edited_text = insert_with_spacing(transcript[:char_end], replacement_value, transcript[char_end:])
+        next_start = (
+            float(aligned_words[end_idx + 1]["start"])
+            if end_idx + 1 < len(aligned_words)
+            else span_end + 0.12
+        )
+        original_duration = max(next_start - span_end, 0.12)
+        span_start = span_end
+        original_text = ""
+
     return {
         "original_text": transcript,
         "edited_text": edited_text,
+        "action": action,
         "target_text": target_text,
-        "replacement_text": replacement_text.strip(),
+        "replacement_text": replacement_value,
         "occurrence": occurrence,
         "preserve_timing": preserve_timing,
         "spans": [
             {
                 "start_word_index": start_idx,
                 "end_word_index": end_idx,
-                "start_seconds": float(start_word["start"]),
-                "end_seconds": float(end_word["end"]),
+                "start_seconds": span_start,
+                "end_seconds": span_end,
                 "original_duration_seconds": original_duration,
-                "original_text": transcript[char_start:char_end],
-                "replacement_text": replacement_text.strip(),
+                "original_text": original_text,
+                "replacement_text": replacement_value,
             }
         ],
     }
@@ -263,6 +303,10 @@ def render_speech_edit(
     output_spec_path: str | None = None,
     preserve_timing: bool = True,
 ) -> dict[str, Any]:
+    from f5_tts.api import F5TTS
+    from f5_tts.infer.utils_infer import save_spectrogram
+    from f5_tts.model.utils import convert_char_to_pinyin
+
     tts = F5TTS(model="F5TTS_v1_Base", ckpt_file=ckpt_file, use_ema=use_ema)
     tts._ensure_loaded()
 
@@ -297,8 +341,11 @@ def render_speech_edit(
             duration_seconds = original_duration
         else:
             original_units = max(len(tokenize_transcript(span["original_text"])), 1)
-            replacement_units = max(len(tokenize_transcript(span["replacement_text"])), 1)
-            duration_seconds = original_duration * (replacement_units / original_units)
+            replacement_units = len(tokenize_transcript(span["replacement_text"]))
+            if replacement_units == 0:
+                duration_seconds = min(max(original_duration * 0.25, 0.04), 0.12)
+            else:
+                duration_seconds = original_duration * max(replacement_units / original_units, 0.35)
         duration_frames = round(duration_seconds * tts.target_sample_rate / hop_length)
         keep_frames = max(start_frame - offset_frame, 0)
 
