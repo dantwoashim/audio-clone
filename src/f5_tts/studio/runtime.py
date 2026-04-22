@@ -1017,6 +1017,7 @@ class StudioService:
         style: dict | None,
         context_notes: str,
         text: str,
+        mode: str = "final",
     ) -> dict[str, Any]:
         analysis = dict(reference.get("analysis") or {})
         quality = reference_quality_breakdown(analysis)
@@ -1053,13 +1054,31 @@ class StudioService:
         reference_tokens = set(word_tokens(reference.get("transcript", "")))
         lexical_overlap = len(target_tokens & reference_tokens) * 0.3 if target_tokens and reference_tokens else 0.0
 
-        final_score = float(quality["score"]) + (rate_alignment * 10.0) + duration_bonus + speech_bonus + keyword_bonus + lexical_overlap
+        if mode == "preview":
+            latency_penalty = max(duration - 7.5, 0.0) * 2.4
+            shorter_bonus = max(7.5 - duration, 0.0) * 0.8
+        else:
+            latency_penalty = max(duration - 9.0, 0.0) * 0.7
+            shorter_bonus = max(8.0 - duration, 0.0) * 0.2
+
+        final_score = (
+            float(quality["score"])
+            + (rate_alignment * 10.0)
+            + duration_bonus
+            + speech_bonus
+            + keyword_bonus
+            + lexical_overlap
+            + shorter_bonus
+            - latency_penalty
+        )
         reasons = [
             f"quality {quality['score']:.1f}/{quality['rating']}",
             f"pace {reference_rate:.2f}u/s vs target {desired_rate:.2f}u/s",
         ]
         if duration_bonus:
             reasons.append(f"duration {duration:.1f}s in the sweet spot")
+        if latency_penalty > 0:
+            reasons.append(f"latency penalty for {duration:.1f}s reference")
         if keyword_hits:
             reasons.append("matched cues: " + ", ".join(keyword_hits[:3]))
 
@@ -1083,6 +1102,7 @@ class StudioService:
         style_id: int | None = None,
         context_notes: str = "",
         text: str = "",
+        mode: str = "final",
     ) -> list[dict[str, Any]]:
         profile = self.store.get_voice_profile(profile_id)
         style = self.store.get_voice_asset(style_id) if style_id else None
@@ -1092,6 +1112,7 @@ class StudioService:
                 style=style,
                 context_notes=context_notes,
                 text=text,
+                mode=mode,
             )
             for member in profile.get("members", [])
         ]
@@ -1109,6 +1130,7 @@ class StudioService:
                 style_id=request.style_id,
                 context_notes=request.context_notes,
                 text=request.text,
+                mode=request.mode,
             )
             if not ranked:
                 raise ValueError("The selected voice profile does not contain any usable references.")

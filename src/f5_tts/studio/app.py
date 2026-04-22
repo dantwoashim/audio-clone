@@ -1116,6 +1116,42 @@ def create_studio_app():
             gr.update(value=state["current_use_ema"]),
         )
 
+    def render_updates(selected_project_id: int | None = None):
+        if not selected_project_id:
+            return (
+                "",
+                [],
+                [],
+                [],
+                gr.update(choices=[], value=None),
+                gr.update(choices=[], value=None),
+                gr.update(choices=[], value=None),
+                gr.update(choices=[], value=None),
+                gr.update(choices=[], value=None),
+                "",
+            )
+
+        project_detail = service.get_project_detail(int(selected_project_id))
+        system_profile = service.system_profile()
+        asset_choices = _choice_pairs(project_detail["assets"], label_key="label")
+        job_choices = [
+            (f"{job['id']} · {job['name']}", int(job["id"]))
+            for job in project_detail["jobs"]
+            if job["status"] in {"queued", "running"}
+        ]
+        return (
+            _project_overview_html(project_detail, system_profile),
+            _asset_rows(project_detail["assets"]),
+            _job_rows(project_detail["jobs"]),
+            _job_rows(project_detail["jobs"]),
+            gr.update(choices=asset_choices, value=_dropdown_value(asset_choices)),
+            gr.update(choices=asset_choices, value=_dropdown_value(asset_choices)),
+            gr.update(choices=asset_choices, value=_dropdown_value(asset_choices, 1) or _dropdown_value(asset_choices)),
+            gr.update(choices=asset_choices, value=_dropdown_value(asset_choices)),
+            gr.update(choices=job_choices, value=_dropdown_value(job_choices)),
+            _runtime_snapshot_html(system_profile),
+        )
+
     def create_project(name: str, description: str, current_project_id: int | None):
         if not name.strip():
             raise gr.Error("Enter a project name first.")
@@ -1345,7 +1381,7 @@ def create_studio_app():
             raise gr.Error(job.get("error_text") or "Render failed.")
 
         result = job["result"]
-        refresh = project_updates(project_id)
+        refresh = render_updates(project_id)
         status = (
             f"{mode.title()} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
@@ -1488,7 +1524,7 @@ def create_studio_app():
             raise gr.Error(job.get("error_text") or "Render failed.")
 
         result = job["result"]
-        refresh = project_updates(project_id)
+        refresh = render_updates(project_id)
         selection = result.get("reference_selection") or {}
         profile_line = (
             f"Voice profile: {result.get('voice_profile_name')} -> {result.get('resolved_reference_name')}\n"
@@ -1566,7 +1602,7 @@ def create_studio_app():
             nfe_step=effective_nfe,
             render_spectrogram=render_spectrogram,
         )
-        refresh = project_updates(project_id)
+        refresh = render_updates(project_id)
         status = (
             f"Edit render complete.\n"
             f"Asset #{result['asset_id']} saved to the project library.\n"
@@ -1611,7 +1647,7 @@ def create_studio_app():
                 0,
             )
             service.enqueue_generation(request)
-        refresh = project_updates(project_id)
+        refresh = render_updates(project_id)
         status = f"Queued {len(scripts)} jobs. The worker will process them one at a time."
         return (status,) + refresh
 
@@ -1800,7 +1836,7 @@ def create_studio_app():
         if not job_id:
             raise gr.Error("Choose a queued job to cancel.")
         service.cancel_job(int(job_id))
-        refresh = project_updates(project_id)
+        refresh = render_updates(project_id)
         return ("Cancellation requested.",) + refresh
 
     initial_state = _project_state()
@@ -2507,6 +2543,19 @@ def create_studio_app():
                 trained_use_ema,
             ]
 
+            render_refresh_outputs = [
+                project_overview,
+                assets_table,
+                jobs_table,
+                batch_jobs_table,
+                diagnostic_asset_choice,
+                take_a,
+                take_b,
+                export_take_choice,
+                cancel_job_choice,
+                runtime_snapshot,
+            ]
+
             load_preset_btn.click(load_preset, inputs=[preset_choice], outputs=[render_text])
             voice_load_preset_btn.click(load_preset, inputs=[voice_preset_choice], outputs=[voice_text])
             trained_load_preset_btn.click(load_preset, inputs=[trained_preset_choice], outputs=[trained_text])
@@ -2600,7 +2649,7 @@ def create_studio_app():
                     render_spectrogram,
                     seed,
                 ],
-                outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
+                outputs=[output_audio, output_spectrogram, render_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2621,7 +2670,7 @@ def create_studio_app():
                     render_spectrogram,
                     seed,
                 ],
-                outputs=[output_audio, output_spectrogram, render_status] + refresh_outputs,
+                outputs=[output_audio, output_spectrogram, render_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2667,7 +2716,7 @@ def create_studio_app():
                     voice_render_spectrogram,
                     voice_seed,
                 ],
-                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
+                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2691,7 +2740,7 @@ def create_studio_app():
                     voice_render_spectrogram,
                     voice_seed,
                 ],
-                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
+                outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2739,7 +2788,7 @@ def create_studio_app():
                     trained_render_spectrogram,
                     trained_seed,
                 ],
-                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + refresh_outputs,
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2764,7 +2813,7 @@ def create_studio_app():
                     trained_render_spectrogram,
                     trained_seed,
                 ],
-                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + refresh_outputs,
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2783,7 +2832,7 @@ def create_studio_app():
                     edit_nfe_step,
                     edit_render_spectrogram,
                 ],
-                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + refresh_outputs,
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2802,7 +2851,7 @@ def create_studio_app():
                     edit_nfe_step,
                     edit_render_spectrogram,
                 ],
-                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + refresh_outputs,
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2818,13 +2867,13 @@ def create_studio_app():
             batch_submit_btn.click(
                 submit_batch,
                 inputs=[active_project, batch_reference, batch_style, batch_mode, batch_use_style, batch_context, batch_scripts],
-                outputs=[batch_status] + refresh_outputs,
+                outputs=[batch_status] + render_refresh_outputs,
             )
 
             cancel_job_btn.click(
                 cancel_job,
                 inputs=[active_project, cancel_job_choice],
-                outputs=[batch_status] + refresh_outputs,
+                outputs=[batch_status] + render_refresh_outputs,
             )
 
             compare_btn.click(
