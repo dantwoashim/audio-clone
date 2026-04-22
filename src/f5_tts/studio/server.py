@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from f5_tts.infer.utils_infer import tempfile_kwargs
 from f5_tts.studio.runtime import get_service
-from f5_tts.studio.schemas import EditRenderRequest, GenerationRequest, ProjectCreate, PronunciationRuleCreate
+from f5_tts.studio.schemas import EditRenderRequest, GenerationRequest, ProjectCreate, PronunciationRuleCreate, VoiceProfileCreate
 from f5_tts.studio.security import (
     ensure_upload_within_limit,
     get_security_settings,
@@ -79,9 +79,23 @@ def create_api_router(service) -> APIRouter:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @router.get("/projects/{project_id}/voice-profiles")
+    def list_voice_profiles(project_id: int):
+        return service.list_voice_profiles(project_id)
+
     @router.post("/pronunciation-rules")
     def save_pronunciation_rule(payload: PronunciationRuleCreate):
         return service.save_pronunciation_rule(payload.project_id, payload.source, payload.replacement)
+
+    @router.post("/voice-profiles")
+    def save_voice_profile(payload: VoiceProfileCreate):
+        return service.save_voice_profile(
+            payload.project_id,
+            payload.name,
+            payload.reference_ids,
+            description=payload.description,
+            profile_id=payload.profile_id,
+        )
 
     @router.post("/references/analyze")
     def analyze_reference(

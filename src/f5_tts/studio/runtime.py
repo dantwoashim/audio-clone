@@ -78,6 +78,7 @@ _SMALL_NUMBERS = [
 ]
 _TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 _TIMING_TOKEN_PATTERN = re.compile(r"[\u3400-\u9FFF]|[A-Za-z0-9']+|[^\s]")
+_WORD_PATTERN = re.compile(r"[A-Za-z0-9']+")
 
 
 class JobCancelledError(RuntimeError):
@@ -113,6 +114,10 @@ def chunk_text(text: str, max_chars: int = 135) -> list[str]:
 
 def text_timing_units(text: str) -> int:
     return len(_TIMING_TOKEN_PATTERN.findall(text.strip()))
+
+
+def word_tokens(text: str) -> list[str]:
+    return _WORD_PATTERN.findall(text.lower())
 
 
 def number_to_words(value: int) -> str:
@@ -932,6 +937,7 @@ class StudioService:
         return self.store.create_project(name, description)
 
     def get_project_detail(self, project_id: int) -> dict:
+        self.store.sync_default_voice_profile(project_id)
         return self.store.get_project_detail(project_id)
 
     def list_references(self, project_id: int) -> list[dict]:
@@ -939,6 +945,34 @@ class StudioService:
 
     def list_styles(self, project_id: int) -> list[dict]:
         return self.store.list_voice_assets(project_id, "style")
+
+    def list_voice_profiles(self, project_id: int) -> list[dict]:
+        self.store.sync_default_voice_profile(project_id)
+        return self.store.list_voice_profiles(project_id)
+
+    def get_voice_profile(self, profile_id: int) -> dict:
+        return self.store.get_voice_profile(profile_id)
+
+    def save_voice_profile(
+        self,
+        project_id: int,
+        name: str,
+        reference_ids: list[int],
+        *,
+        description: str = "",
+        profile_id: int | None = None,
+        is_default: bool = False,
+    ) -> dict:
+        profile = self.store.save_voice_profile(
+            project_id,
+            name,
+            reference_ids,
+            description=description,
+            profile_id=profile_id,
+            is_default=is_default,
+        )
+        self.maybe_unload_idle_engine()
+        return profile
 
     def list_assets(self, project_id: int) -> list[dict]:
         return self.store.list_audio_assets(project_id)
@@ -965,6 +999,143 @@ class StudioService:
             )
         recommendations.sort(key=lambda row: (-row["score"], row["name"].lower(), row["id"]))
         return recommendations
+
+    def _desired_reference_rate(self, style: dict | None, context_notes: str) -> float:
+        desired_rate = 3.2
+        if style:
+            desired_rate *= float(style.get("analysis", {}).get("recommended_speed", 1.0) or 1.0)
+        lowered = context_notes.lower()
+        for keyword, modifier in CONTEXT_MODIFIERS.items():
+            if keyword in lowered:
+                desired_rate *= float(modifier["speed"])
+        return min(max(desired_rate, 1.8), 5.4)
+
+    def _score_profile_reference(
+        self,
+        reference: dict,
+        *,
+        style: dict | None,
+        context_notes: str,
+        text: str,
+    ) -> dict[str, Any]:
+        analysis = dict(reference.get("analysis") or {})
+        quality = reference_quality_breakdown(analysis)
+        duration = float(analysis.get("duration_seconds", 0.0) or 0.0)
+        speech_seconds = float(analysis.get("speech_seconds", 0.0) or 0.0)
+        denominator = speech_seconds if speech_seconds > 0 else max(duration, 0.1)
+        reference_rate = text_timing_units(reference.get("transcript", "")) / max(denominator, 0.1)
+        desired_rate = self._desired_reference_rate(style, context_notes)
+        rate_alignment = max(0.0, 1.0 - (abs(reference_rate - desired_rate) / max(desired_rate, 0.1)))
+        duration_bonus = 6.0 if 6.0 <= duration <= 10.5 else 3.0 if 4.5 <= duration <= 12.0 else 0.0
+        speech_ratio = float(analysis.get("speech_ratio", 0.0) or 0.0)
+        speech_bonus = max(min((speech_ratio - 0.72) * 18.0, 5.0), 0.0)
+
+        keyword_bonus = 0.0
+        keyword_hits: list[str] = []
+        searchable = " ".join(
+            [
+                str(reference.get("name", "")).lower(),
+                str(reference.get("transcript", "")).lower(),
+            ]
+        )
+        for keyword in sorted(set(word_tokens(context_notes))):
+            if keyword in searchable and len(keyword) > 2:
+                keyword_bonus += 2.5
+                keyword_hits.append(keyword)
+        if style:
+            for keyword in style.get("analysis", {}).get("matched_keywords", []):
+                lowered = str(keyword).lower()
+                if lowered and lowered in searchable and lowered not in keyword_hits:
+                    keyword_bonus += 2.0
+                    keyword_hits.append(lowered)
+
+        target_tokens = set(word_tokens(text))
+        reference_tokens = set(word_tokens(reference.get("transcript", "")))
+        lexical_overlap = len(target_tokens & reference_tokens) * 0.3 if target_tokens and reference_tokens else 0.0
+
+        final_score = float(quality["score"]) + (rate_alignment * 10.0) + duration_bonus + speech_bonus + keyword_bonus + lexical_overlap
+        reasons = [
+            f"quality {quality['score']:.1f}/{quality['rating']}",
+            f"pace {reference_rate:.2f}u/s vs target {desired_rate:.2f}u/s",
+        ]
+        if duration_bonus:
+            reasons.append(f"duration {duration:.1f}s in the sweet spot")
+        if keyword_hits:
+            reasons.append("matched cues: " + ", ".join(keyword_hits[:3]))
+
+        return {
+            "id": int(reference["id"]),
+            "name": reference["name"],
+            "score": round(final_score, 2),
+            "quality_score": round(float(quality["score"]), 2),
+            "quality_rating": quality["rating"],
+            "reference_rate": round(reference_rate, 3),
+            "desired_rate": round(desired_rate, 3),
+            "duration_seconds": duration,
+            "keyword_hits": keyword_hits,
+            "summary": " · ".join(reasons[:3]),
+        }
+
+    def recommend_profile_references(
+        self,
+        profile_id: int,
+        *,
+        style_id: int | None = None,
+        context_notes: str = "",
+        text: str = "",
+    ) -> list[dict[str, Any]]:
+        profile = self.store.get_voice_profile(profile_id)
+        style = self.store.get_voice_asset(style_id) if style_id else None
+        candidates = [
+            self._score_profile_reference(
+                member,
+                style=style,
+                context_notes=context_notes,
+                text=text,
+            )
+            for member in profile.get("members", [])
+        ]
+        candidates.sort(key=lambda row: (-float(row["score"]), str(row["name"]).lower(), int(row["id"])))
+        return candidates
+
+    def _resolve_generation_route(self, request: GenerationRequest) -> dict[str, Any]:
+        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        if request.voice_profile_id:
+            profile = self.store.get_voice_profile(int(request.voice_profile_id))
+            if int(profile["project_id"]) != int(request.project_id):
+                raise ValueError("Selected voice profile does not belong to the active project.")
+            ranked = self.recommend_profile_references(
+                int(profile["id"]),
+                style_id=request.style_id,
+                context_notes=request.context_notes,
+                text=request.text,
+            )
+            if not ranked:
+                raise ValueError("The selected voice profile does not contain any usable references.")
+            reference = self.store.get_voice_asset(int(ranked[0]["id"]))
+            return {
+                "reference": reference,
+                "style": style,
+                "voice_profile": profile,
+                "reference_selection": ranked[0],
+                "reference_candidates": ranked[:3],
+            }
+
+        if request.reference_id is None:
+            raise ValueError("Choose a reference voice or a voice profile before rendering.")
+        reference = self.store.get_voice_asset(int(request.reference_id))
+        return {
+            "reference": reference,
+            "style": style,
+            "voice_profile": None,
+            "reference_selection": {
+                "id": int(reference["id"]),
+                "name": reference["name"],
+                "score": round(float(reference_quality_breakdown(reference.get("analysis") or {})["score"]), 2),
+                "summary": "Explicit reference selected.",
+            },
+            "reference_candidates": [],
+        }
 
     def diagnose_asset(
         self,
@@ -1047,6 +1218,7 @@ class StudioService:
             transcript=analysis.transcript,
             analysis=analysis.model_dump(),
         )
+        self.store.sync_default_voice_profile(project_id)
         self.maybe_unload_idle_engine()
         return saved, analysis.model_dump()
 
@@ -1181,8 +1353,9 @@ class StudioService:
         return {"asset_id": asset["id"], **result}
 
     def estimate(self, request: GenerationRequest) -> dict:
-        reference = self.store.get_voice_asset(request.reference_id)
-        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        resolved = self._resolve_generation_route(request)
+        reference = resolved["reference"]
+        style = resolved["style"]
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
         normalized_text = normalize_script(request.text, pronunciation_rules)
         speed = request.speed if request.speed is not None else 1.0
@@ -1211,11 +1384,19 @@ class StudioService:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
-    def _finalize_completed_job(self, job_id: int, request: GenerationRequest, result: dict) -> dict:
+    def _finalize_completed_job(self, job_id: int, request: GenerationRequest, result: dict, resolved: dict[str, Any]) -> dict:
+        reference = resolved["reference"]
+        voice_profile = resolved.get("voice_profile")
+        selection = dict(resolved.get("reference_selection") or {})
         result_with_provenance = {
             **result,
             "requested_text": request.text,
-            "reference_id": request.reference_id,
+            "reference_id": int(reference["id"]),
+            "requested_reference_id": request.reference_id,
+            "voice_profile_id": int(voice_profile["id"]) if voice_profile else None,
+            "voice_profile_name": voice_profile["name"] if voice_profile else None,
+            "resolved_reference_name": reference["name"],
+            "reference_selection": selection,
             "style_id": request.style_id,
             "mode": request.mode,
             "checkpoint_path": request.checkpoint_path,
@@ -1239,8 +1420,9 @@ class StudioService:
     def _execute_job(self, job_id: int, request: GenerationRequest) -> dict:
         job = self.store.update_job(job_id, status="running")
         project = self.store.get_project_summary(request.project_id)
-        reference = self.store.get_voice_asset(request.reference_id)
-        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        resolved = self._resolve_generation_route(request)
+        reference = resolved["reference"]
+        style = resolved["style"]
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
         result = self.engine.render(
             request,
@@ -1250,13 +1432,14 @@ class StudioService:
             output_dir=self._job_output_dir(project),
             **self._engine_options_for_request(request),
         )
-        return self._finalize_completed_job(job_id, request, result)
+        return self._finalize_completed_job(job_id, request, result, resolved)
 
     def _execute_job_in_subprocess(self, job_id: int, request: GenerationRequest) -> dict:
         self.store.update_job(job_id, status="running")
         project = self.store.get_project_summary(request.project_id)
-        reference = self.store.get_voice_asset(request.reference_id)
-        style = self.store.get_voice_asset(request.style_id) if request.style_id else None
+        resolved = self._resolve_generation_route(request)
+        reference = resolved["reference"]
+        style = resolved["style"]
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
         result_queue: mp.Queue = self._process_context.Queue()
         process = self._process_context.Process(
@@ -1303,7 +1486,7 @@ class StudioService:
         process.join(timeout=5)
         if not payload.get("ok"):
             raise RuntimeError(payload.get("error", "Render worker failed."))
-        return self._finalize_completed_job(job_id, request, payload["result"])
+        return self._finalize_completed_job(job_id, request, payload["result"], resolved)
 
     def render_now(self, request: GenerationRequest) -> dict:
         job = self.store.create_job(request.project_id, request.name, request.model_dump())

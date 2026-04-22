@@ -536,6 +536,27 @@ def _dropdown_value(choices: list[tuple[str, int]], index: int = 0) -> int | Non
     return choices[index][1] if len(choices) > index else None
 
 
+def _first_nonzero_value(choices: list[tuple[str, int]]) -> int | None:
+    for _, value in choices:
+        if int(value) != 0:
+            return int(value)
+    return None
+
+
+def _voice_profile_choice_pairs(items: list[dict], include_none: bool = False, include_new: bool = False) -> list[tuple[str, int]]:
+    choices: list[tuple[str, int]] = []
+    if include_none:
+        choices.append(("No voice profile", 0))
+    if include_new:
+        choices.append(("New custom profile", 0))
+    for item in items:
+        default_prefix = "Auto · " if int(item.get("is_default", 0) or 0) == 1 else ""
+        count = int(item.get("member_count", len(item.get("member_ids", []))) or 0)
+        label = f"{default_prefix}{item['name']} ({count} refs)"
+        choices.append((label, int(item["id"])))
+    return choices
+
+
 def _human_variant_name(name: str) -> str:
     labels = {
         "base": "Base model",
@@ -580,9 +601,9 @@ def _project_overview_html(project: dict, system_profile: dict) -> str:
     checkpoint_label = _current_voice_label(system_profile)
     stats = [
         ("Saved references", str(len(project["references"]))),
+        ("Voice profiles", str(len(project.get("voice_profiles", [])))),
         ("Style prompts", str(len(project["styles"]))),
         ("Recorded takes", str(len(project["assets"]))),
-        ("Queued jobs", str(len([job for job in project["jobs"] if job["status"] in {'queued', 'running'}]))),
     ]
     stat_html = "".join(
         f"""
@@ -731,6 +752,21 @@ def _style_rows(items: list[dict]) -> list[list[object]]:
                 format_duration(float(analysis.get("duration_seconds", 0.0))),
                 f"{float(analysis.get('recommended_speed', 1.0)):.2f}",
                 ", ".join(analysis.get("matched_keywords", [])),
+            ]
+        )
+    return rows
+
+
+def _voice_profile_rows(items: list[dict]) -> list[list[object]]:
+    rows = []
+    for item in items:
+        rows.append(
+            [
+                item["id"],
+                item["name"],
+                "Auto" if int(item.get("is_default", 0) or 0) == 1 else "Custom",
+                int(item.get("member_count", len(item.get("member_ids", []))) or 0),
+                ", ".join(item.get("member_names", [])[:3]) + (" ..." if len(item.get("member_names", [])) > 3 else ""),
             ]
         )
     return rows
@@ -959,6 +995,7 @@ def create_studio_app():
         project_detail = service.get_project_detail(int(selected_project_id))
         references = project_detail["references"]
         styles = project_detail["styles"]
+        voice_profiles = project_detail.get("voice_profiles", [])
         assets = project_detail["assets"]
         sources = [asset for asset in assets if asset["kind"] == "source"]
         jobs = project_detail["jobs"]
@@ -968,6 +1005,8 @@ def create_studio_app():
 
         reference_choices = _choice_pairs(references)
         style_choices = [("No style prompt", 0)] + _choice_pairs(styles)
+        voice_profile_choices = _voice_profile_choice_pairs(voice_profiles)
+        voice_profile_optional_choices = _voice_profile_choice_pairs(voice_profiles, include_none=True)
         source_choices = _choice_pairs(sources, label_key="label")
         asset_choices = _choice_pairs(assets, label_key="label")
         job_choices = [(f"{job['id']} · {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}]
@@ -976,6 +1015,8 @@ def create_studio_app():
         trained_payload = _discover_trained_payload(system_profile, checkpoint_choices)
         current_checkpoint = system_profile.get("checkpoint_path") or ""
         current_use_ema = bool(system_profile.get("use_ema", True))
+        active_profile = voice_profiles[0] if voice_profiles else None
+        active_profile_members = active_profile.get("member_ids", []) if active_profile else []
 
         return {
             "project_choices": project_choices,
@@ -985,6 +1026,15 @@ def create_studio_app():
             "reference_value": (recommended_references[0]["id"] if recommended_references else _dropdown_value(reference_choices)),
             "style_choices": style_choices,
             "style_value": 0,
+            "voice_profile_choices": voice_profile_choices,
+            "voice_profile_optional_choices": voice_profile_optional_choices,
+            "voice_profile_value": _first_nonzero_value(voice_profile_optional_choices) or 0,
+            "voice_profile_rows": _voice_profile_rows(voice_profiles),
+            "profile_editor_choices": _voice_profile_choice_pairs(voice_profiles, include_new=True),
+            "profile_editor_value": int(active_profile["id"]) if active_profile else 0,
+            "profile_editor_name": active_profile["name"] if active_profile else "",
+            "profile_editor_description": active_profile.get("description", "") if active_profile else "",
+            "profile_editor_members": active_profile_members,
             "source_choices": source_choices,
             "source_value": _dropdown_value(source_choices),
             "voice_model_choices": voice_model_choices,
@@ -1029,7 +1079,16 @@ def create_studio_app():
             gr.update(choices=state["style_choices"], value=state["style_value"]),
             gr.update(choices=state["source_choices"], value=state["source_value"]),
             gr.update(choices=state["voice_model_choices"], value=state["voice_model_value"]),
+            gr.update(choices=state["voice_profile_optional_choices"], value=state["voice_profile_value"]),
+            gr.update(choices=state["profile_editor_choices"], value=state["profile_editor_value"]),
+            gr.update(value=state["profile_editor_name"]),
+            gr.update(value=state["profile_editor_description"]),
+            gr.update(choices=state["reference_choices"], value=state["profile_editor_members"]),
+            gr.update(choices=state["voice_profile_optional_choices"], value=state["voice_profile_value"]),
+            gr.update(choices=state["reference_choices"], value=state["reference_value"]),
+            gr.update(choices=state["style_choices"], value=state["style_value"]),
             state["reference_rows"],
+            state["voice_profile_rows"],
             state["style_rows"],
             state["asset_rows"],
             state["job_rows"],
@@ -1116,6 +1175,51 @@ def create_studio_app():
         )
         return metadata["transcript"], summary, json.dumps(metadata["alignment"][:48], indent=2) + ("\n..." if len(metadata["alignment"]) > 48 else ""), *refresh
 
+    def load_voice_profile_editor(project_id: int, profile_id: int | None):
+        if not project_id:
+            return "", "", []
+        if not profile_id:
+            return "", "", []
+        profile = service.get_voice_profile(int(profile_id))
+        return profile["name"], profile.get("description", ""), [int(reference_id) for reference_id in profile.get("member_ids", [])]
+
+    def save_voice_profile_editor(
+        project_id: int,
+        profile_id: int | None,
+        name: str,
+        description: str,
+        member_ids: list[int] | None,
+    ):
+        if not project_id:
+            raise gr.Error("Select a project first.")
+        normalized_member_ids = [int(reference_id) for reference_id in (member_ids or [])]
+        if not normalized_member_ids:
+            raise gr.Error("Choose at least one saved reference for the voice profile.")
+        if not name.strip():
+            raise gr.Error("Give the voice profile a name.")
+        saved = service.save_voice_profile(
+            int(project_id),
+            name.strip(),
+            normalized_member_ids,
+            description=description.strip(),
+            profile_id=None if not profile_id else int(profile_id),
+        )
+        refresh = list(project_updates(project_id))
+        profile_choices = _voice_profile_choice_pairs(service.list_voice_profiles(int(project_id)), include_none=True)
+        editor_choices = _voice_profile_choice_pairs(service.list_voice_profiles(int(project_id)), include_new=True)
+        refresh[10] = gr.update(choices=profile_choices, value=int(saved["id"]))
+        refresh[11] = gr.update(choices=editor_choices, value=int(saved["id"]))
+        refresh[12] = gr.update(value=saved["name"])
+        refresh[13] = gr.update(value=saved.get("description", ""))
+        refresh[14] = gr.update(choices=_choice_pairs(service.list_references(int(project_id))), value=saved.get("member_ids", []))
+        refresh[15] = gr.update(choices=profile_choices, value=int(saved["id"]))
+        summary = (
+            f"Saved voice profile #{saved['id']}.\n"
+            f"Members: {saved.get('member_count', len(saved.get('member_ids', [])))}\n"
+            f"References: {', '.join(saved.get('member_names', [])[:4])}"
+        )
+        return summary, *refresh
+
     def build_request(
         project_id: int,
         reference_id: int,
@@ -1132,16 +1236,27 @@ def create_studio_app():
         seed: int,
         checkpoint_override: str | None = None,
         use_ema_override: bool | None = None,
+        voice_profile_id: int | None = None,
+        route_mode: str = "reference",
     ) -> GenerationRequest:
         if not project_id:
             raise gr.Error("Select a project first.")
-        if not reference_id:
-            raise gr.Error("Save or choose a reference voice first.")
         if not text.strip():
             raise gr.Error("Enter text to generate.")
+        if route_mode == "profile":
+            if not voice_profile_id:
+                raise gr.Error("Choose a voice profile first.")
+            resolved_reference_id = None
+            resolved_profile_id = int(voice_profile_id)
+        else:
+            if not reference_id:
+                raise gr.Error("Save or choose a reference voice first.")
+            resolved_reference_id = int(reference_id)
+            resolved_profile_id = None
         return GenerationRequest(
             project_id=int(project_id),
-            reference_id=int(reference_id),
+            reference_id=resolved_reference_id,
+            voice_profile_id=resolved_profile_id,
             style_id=None if not style_id else int(style_id),
             name=name.strip() or f"{mode.title()} Render",
             text=text,
@@ -1255,6 +1370,8 @@ def create_studio_app():
         reference_id: int,
         style_id: int,
         model_choice: str,
+        voice_profile_id: int,
+        route_mode: str,
         name: str,
         text: str,
         mode: str,
@@ -1283,6 +1400,8 @@ def create_studio_app():
             seed,
             checkpoint_override=checkpoint_override,
             use_ema_override=use_ema_override,
+            voice_profile_id=voice_profile_id,
+            route_mode=route_mode,
         )
 
     def estimate_voice_render(
@@ -1290,6 +1409,8 @@ def create_studio_app():
         reference_id: int,
         style_id: int,
         model_choice: str,
+        voice_profile_id: int,
+        route_mode: str,
         name: str,
         text: str,
         use_style_prompt: bool,
@@ -1303,6 +1424,8 @@ def create_studio_app():
             reference_id,
             style_id,
             model_choice,
+            voice_profile_id,
+            route_mode,
             name,
             text,
             "final",
@@ -1329,6 +1452,8 @@ def create_studio_app():
         reference_id: int,
         style_id: int,
         model_choice: str,
+        voice_profile_id: int,
+        route_mode: str,
         name: str,
         text: str,
         mode: str,
@@ -1345,6 +1470,8 @@ def create_studio_app():
             reference_id,
             style_id,
             model_choice,
+            voice_profile_id,
+            route_mode,
             name,
             text,
             mode,
@@ -1362,12 +1489,20 @@ def create_studio_app():
 
         result = job["result"]
         refresh = project_updates(project_id)
+        selection = result.get("reference_selection") or {}
+        profile_line = (
+            f"Voice profile: {result.get('voice_profile_name')} -> {result.get('resolved_reference_name')}\n"
+            if result.get("voice_profile_id")
+            else f"Reference: {result.get('resolved_reference_name', 'manual selection')}\n"
+        )
         status = (
             f"Voice page {mode} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
+            f"{profile_line}"
             f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
             f"Output length: {format_duration(result['duration_seconds'])}\n"
-            f"Seed: {result.get('seed', 'random')}"
+            f"Seed: {result.get('seed', 'random')}\n"
+            f"Selection note: {selection.get('summary', 'n/a')}"
         )
         return (
             result["audio_path"],
@@ -1376,10 +1511,10 @@ def create_studio_app():
         ) + refresh
 
     def render_voice_preview(*args):
-        return render_voice_now(*args[:6], "preview", *args[6:])
+        return render_voice_now(*args[:8], "preview", *args[8:])
 
     def render_voice_final(*args):
-        return render_voice_now(*args[:6], "final", *args[6:])
+        return render_voice_now(*args[:8], "final", *args[8:])
 
     def load_edit_source_preview(source_asset_id: int | None):
         if not source_asset_id:
@@ -1533,6 +1668,85 @@ def create_studio_app():
             return "", gr.update(choices=choices, value=""), status, status
         status = f"Detected latest checkpoint: {detected}"
         return detected, gr.update(choices=choices, value=detected), status, status
+
+    def _trained_model_choice(checkpoint_path_value: str, use_ema_value: bool) -> str:
+        return _serialize_voice_model(checkpoint_path_value, use_ema_value)
+
+    def estimate_trained_render(
+        project_id: int,
+        reference_id: int,
+        style_id: int,
+        voice_profile_id: int,
+        route_mode: str,
+        checkpoint_path_value: str,
+        use_ema_value: bool,
+        name: str,
+        text: str,
+        use_style_prompt: bool,
+        context_notes: str,
+        speed: float,
+        nfe_step: int,
+        seed: int,
+    ):
+        return estimate_voice_render(
+            project_id,
+            reference_id,
+            style_id,
+            _trained_model_choice(checkpoint_path_value, use_ema_value),
+            voice_profile_id,
+            route_mode,
+            name,
+            text,
+            use_style_prompt,
+            context_notes,
+            speed,
+            nfe_step,
+            seed,
+        )
+
+    def render_trained_now(
+        project_id: int,
+        reference_id: int,
+        style_id: int,
+        voice_profile_id: int,
+        route_mode: str,
+        checkpoint_path_value: str,
+        use_ema_value: bool,
+        name: str,
+        text: str,
+        mode: str,
+        use_style_prompt: bool,
+        context_notes: str,
+        speed: float,
+        nfe_step: int,
+        remove_silence: bool,
+        render_spectrogram: bool,
+        seed: int,
+    ):
+        return render_voice_now(
+            project_id,
+            reference_id,
+            style_id,
+            _trained_model_choice(checkpoint_path_value, use_ema_value),
+            voice_profile_id,
+            route_mode,
+            name,
+            text,
+            mode,
+            use_style_prompt,
+            context_notes,
+            speed,
+            nfe_step,
+            remove_silence,
+            render_spectrogram,
+            seed,
+        )
+
+    def render_trained_preview(*args):
+        return render_trained_now(*args[:9], "preview", *args[9:])
+
+    def render_trained_final(*args):
+        return render_trained_now(*args[:9], "final", *args[9:])
 
     def save_settings(
         project_id: int,
@@ -1770,14 +1984,24 @@ def create_studio_app():
                         _page_intro_html(
                             "Voices",
                             "Direct text-to-speech for saved and trained voices.",
-                            "Pick a saved reference, decide whether it speaks through the base model or a finetuned checkpoint, then render without bouncing through runtime settings.",
+                            "Pick either a curated voice profile or one explicit reference clip, choose the voice engine, and render directly without bouncing through runtime settings.",
                         )
                     )
                     with gr.Row():
                         with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Voice route")
+                            voice_route_mode = gr.Radio(
+                                label="Render source",
+                                choices=["profile", "reference"],
+                                value="profile",
+                            )
+                            voice_profile_choice = gr.Dropdown(
+                                label="Voice profile",
+                                choices=initial_state["voice_profile_optional_choices"],
+                                value=initial_state["voice_profile_value"],
+                            )
                             voice_reference_choice = gr.Dropdown(
-                                label="Reference voice",
+                                label="Single reference override",
                                 choices=initial_state["reference_choices"],
                                 value=initial_state["reference_value"],
                             )
@@ -1805,8 +2029,33 @@ def create_studio_app():
                                 label="Voice status",
                                 interactive=False,
                                 lines=6,
-                                value="Choose a reference and voice engine, then render directly from this page.",
+                                value="Choose a voice profile for automatic clip selection, or switch to single-reference mode for manual control.",
                             )
+                            with gr.Accordion("Voice profile manager", open=False):
+                                profile_editor_choice = gr.Dropdown(
+                                    label="Edit profile",
+                                    choices=initial_state["profile_editor_choices"],
+                                    value=initial_state["profile_editor_value"],
+                                )
+                                profile_editor_name = gr.Textbox(label="Profile name", value=initial_state["profile_editor_name"])
+                                profile_editor_description = gr.Textbox(
+                                    label="Profile notes",
+                                    lines=3,
+                                    value=initial_state["profile_editor_description"],
+                                )
+                                profile_editor_members = gr.Dropdown(
+                                    label="Member references",
+                                    choices=initial_state["reference_choices"],
+                                    value=initial_state["profile_editor_members"],
+                                    multiselect=True,
+                                )
+                                profile_save_btn = gr.Button("Save voice profile", elem_classes=["studio-secondary"])
+                                profile_status = gr.Textbox(
+                                    label="Profile status",
+                                    interactive=False,
+                                    lines=4,
+                                    value="The auto profile stays synced with all saved references. Create custom profiles when you want a smaller, style-focused subset.",
+                                )
 
                         with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Text to speech")
@@ -1841,7 +2090,7 @@ def create_studio_app():
                             )
                             voice_output_spectrogram = gr.Image(label="Spectrogram")
                             gr.Markdown(
-                                "This page is the fast lane: reference voice plus checkpoint plus text, with no detour through global settings.",
+                                "Profile mode auto-picks the strongest member reference for the requested delivery. Single-reference mode is still here when you want full manual control.",
                                 elem_classes=["studio-muted-note"],
                             )
 
@@ -1850,7 +2099,7 @@ def create_studio_app():
                         _page_intro_html(
                             "Trained voice",
                             "A separate destination for the finetuned model.",
-                            "This page is for checkpoint choice, bakeoff review, and trained recordings. You should not need to hunt through generic library pages to hear what the training actually did.",
+                            "This page is now both the checkpoint cockpit and the trained-voice render lane. Use the finetuned checkpoint with a whole voice profile, not just one clip, when you want the best local speaker match.",
                         )
                     )
                     with gr.Row():
@@ -1917,6 +2166,79 @@ def create_studio_app():
                                 value=initial_state["trained_ft_ema_audio"],
                             )
 
+                    with gr.Row():
+                        with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Trained render route")
+                            trained_route_mode = gr.Radio(
+                                label="Render source",
+                                choices=["profile", "reference"],
+                                value="profile",
+                            )
+                            trained_profile_choice = gr.Dropdown(
+                                label="Voice profile",
+                                choices=initial_state["voice_profile_optional_choices"],
+                                value=initial_state["voice_profile_value"],
+                            )
+                            trained_reference_choice = gr.Dropdown(
+                                label="Single reference override",
+                                choices=initial_state["reference_choices"],
+                                value=initial_state["reference_value"],
+                            )
+                            trained_style_choice = gr.Dropdown(
+                                label="Optional style prompt",
+                                choices=initial_state["style_choices"],
+                                value=initial_state["style_value"],
+                            )
+                            trained_use_style_prompt = gr.Checkbox(
+                                label="Use saved style prompt during generation",
+                                value=True,
+                            )
+                            trained_context_notes = gr.Textbox(
+                                label="Delivery context",
+                                lines=3,
+                                placeholder="Examples: intimate, calm narrator, urgent, trailer read, soft whisper.",
+                            )
+                            trained_take_name = gr.Textbox(label="Take name", value="Trained Voice Render")
+
+                        with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Trained text to speech")
+                            trained_preset_choice = gr.Dropdown(
+                                label="Starter preset",
+                                choices=list(SCRIPT_PRESETS.keys()),
+                                value="Podcast intro",
+                            )
+                            trained_load_preset_btn = gr.Button("Load preset", elem_classes=["studio-secondary"])
+                            trained_text = gr.Textbox(
+                                label="Script",
+                                lines=12,
+                                value=SCRIPT_PRESETS["Podcast intro"],
+                            )
+                            with gr.Accordion("Advanced controls", open=False):
+                                trained_speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
+                                trained_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                trained_seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
+                                trained_remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
+                                trained_render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
+                            with gr.Row():
+                                trained_estimate_btn = gr.Button("Estimate runtime", elem_classes=["studio-secondary"])
+                                trained_preview_btn = gr.Button("Quick preview", elem_classes=["studio-primary"])
+                                trained_final_btn = gr.Button("Final render", elem_classes=["studio-primary"])
+
+                        with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
+                            gr.Markdown("### Latest trained render")
+                            trained_render_audio = gr.Audio(
+                                label="Trained output",
+                                type="filepath",
+                                elem_classes=["studio-audio-card"],
+                            )
+                            trained_render_spectrogram_image = gr.Image(label="Spectrogram")
+                            trained_render_status = gr.Textbox(
+                                label="Render status",
+                                interactive=False,
+                                lines=7,
+                                value="Use profile mode here when you want the trained checkpoint to pick the strongest member clip automatically.",
+                            )
+
                 with gr.Tab("Library"):
                     gr.HTML(
                         _page_intro_html(
@@ -1933,6 +2255,13 @@ def create_studio_app():
                                 interactive=False,
                                 label="Reference library",
                                 value=initial_state["reference_rows"],
+                            )
+                            voice_profiles_table = gr.Dataframe(
+                                headers=["ID", "Name", "Type", "Members", "Reference list"],
+                                datatype=["number", "str", "str", "number", "str"],
+                                interactive=False,
+                                label="Voice profiles",
+                                value=initial_state["voice_profile_rows"],
                             )
                             styles_table = gr.Dataframe(
                                 headers=["ID", "Name", "Duration", "Speed", "Keywords"],
@@ -2141,7 +2470,16 @@ def create_studio_app():
                 voice_style_choice,
                 edit_source_choice,
                 voice_model_choice,
+                voice_profile_choice,
+                profile_editor_choice,
+                profile_editor_name,
+                profile_editor_description,
+                profile_editor_members,
+                trained_profile_choice,
+                trained_reference_choice,
+                trained_style_choice,
                 references_table,
+                voice_profiles_table,
                 styles_table,
                 assets_table,
                 jobs_table,
@@ -2171,6 +2509,7 @@ def create_studio_app():
 
             load_preset_btn.click(load_preset, inputs=[preset_choice], outputs=[render_text])
             voice_load_preset_btn.click(load_preset, inputs=[voice_preset_choice], outputs=[voice_text])
+            trained_load_preset_btn.click(load_preset, inputs=[trained_preset_choice], outputs=[trained_text])
 
             refresh_btn.click(project_updates, inputs=[active_project], outputs=refresh_outputs)
             active_project.change(project_updates, inputs=[active_project], outputs=refresh_outputs)
@@ -2209,6 +2548,20 @@ def create_studio_app():
                 load_edit_source_preview,
                 inputs=[edit_source_choice],
                 outputs=[edit_source_text, edit_alignment_preview, edit_source_audio_preview],
+            )
+
+            profile_editor_choice.change(
+                load_voice_profile_editor,
+                inputs=[active_project, profile_editor_choice],
+                outputs=[profile_editor_name, profile_editor_description, profile_editor_members],
+            )
+
+            profile_save_btn.click(
+                save_voice_profile_editor,
+                inputs=[active_project, profile_editor_choice, profile_editor_name, profile_editor_description, profile_editor_members],
+                outputs=[profile_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
             )
 
             estimate_btn.click(
@@ -2280,6 +2633,8 @@ def create_studio_app():
                     voice_reference_choice,
                     voice_style_choice,
                     voice_model_choice,
+                    voice_profile_choice,
+                    voice_route_mode,
                     voice_take_name,
                     voice_text,
                     voice_use_style_prompt,
@@ -2300,6 +2655,8 @@ def create_studio_app():
                     voice_reference_choice,
                     voice_style_choice,
                     voice_model_choice,
+                    voice_profile_choice,
+                    voice_route_mode,
                     voice_take_name,
                     voice_text,
                     voice_use_style_prompt,
@@ -2322,6 +2679,8 @@ def create_studio_app():
                     voice_reference_choice,
                     voice_style_choice,
                     voice_model_choice,
+                    voice_profile_choice,
+                    voice_route_mode,
                     voice_take_name,
                     voice_text,
                     voice_use_style_prompt,
@@ -2333,6 +2692,79 @@ def create_studio_app():
                     voice_seed,
                 ],
                 outputs=[voice_output_audio, voice_output_spectrogram, voice_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            trained_estimate_btn.click(
+                estimate_trained_render,
+                inputs=[
+                    active_project,
+                    trained_reference_choice,
+                    trained_style_choice,
+                    trained_profile_choice,
+                    trained_route_mode,
+                    trained_checkpoint_choice,
+                    trained_use_ema,
+                    trained_take_name,
+                    trained_text,
+                    trained_use_style_prompt,
+                    trained_context_notes,
+                    trained_speed,
+                    trained_nfe_step,
+                    trained_seed,
+                ],
+                outputs=[trained_render_status],
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            trained_preview_btn.click(
+                render_trained_preview,
+                inputs=[
+                    active_project,
+                    trained_reference_choice,
+                    trained_style_choice,
+                    trained_profile_choice,
+                    trained_route_mode,
+                    trained_checkpoint_choice,
+                    trained_use_ema,
+                    trained_take_name,
+                    trained_text,
+                    trained_use_style_prompt,
+                    trained_context_notes,
+                    trained_speed,
+                    trained_nfe_step,
+                    trained_remove_silence,
+                    trained_render_spectrogram,
+                    trained_seed,
+                ],
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + refresh_outputs,
+                concurrency_limit=1,
+                concurrency_id="studio_compute",
+            )
+
+            trained_final_btn.click(
+                render_trained_final,
+                inputs=[
+                    active_project,
+                    trained_reference_choice,
+                    trained_style_choice,
+                    trained_profile_choice,
+                    trained_route_mode,
+                    trained_checkpoint_choice,
+                    trained_use_ema,
+                    trained_take_name,
+                    trained_text,
+                    trained_use_style_prompt,
+                    trained_context_notes,
+                    trained_speed,
+                    trained_nfe_step,
+                    trained_remove_silence,
+                    trained_render_spectrogram,
+                    trained_seed,
+                ],
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2445,7 +2877,6 @@ def create_studio_app():
                 outputs=[rule_status] + refresh_outputs,
             )
 
-            app.load(project_updates, outputs=refresh_outputs)
             app.load(service.warm_profile_if_needed, outputs=[render_status])
             app.unload(service.maybe_unload_idle_engine)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectCreate(BaseModel):
@@ -14,6 +14,14 @@ class PronunciationRuleCreate(BaseModel):
     project_id: int
     source: str = Field(min_length=1, max_length=120)
     replacement: str = Field(min_length=1, max_length=240)
+
+
+class VoiceProfileCreate(BaseModel):
+    project_id: int
+    profile_id: int | None = None
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    reference_ids: list[int] = Field(min_length=1)
 
 
 class EditRenderRequest(BaseModel):
@@ -67,6 +75,19 @@ class VoiceAssetView(BaseModel):
     updated_at: str
 
 
+class VoiceProfileView(BaseModel):
+    id: int
+    project_id: int
+    name: str
+    description: str = ""
+    is_default: bool = False
+    member_count: int = 0
+    member_ids: list[int] = Field(default_factory=list)
+    member_names: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
 class PronunciationRuleView(BaseModel):
     id: int
     project_id: int
@@ -100,7 +121,8 @@ class GenerationResultView(BaseModel):
 
 class GenerationRequest(BaseModel):
     project_id: int
-    reference_id: int
+    reference_id: int | None = None
+    voice_profile_id: int | None = None
     style_id: int | None = None
     name: str = Field(default="Untitled Render", max_length=120)
     text: str = Field(min_length=1)
@@ -117,6 +139,12 @@ class GenerationRequest(BaseModel):
     checkpoint_path: str | None = None
     use_ema: bool | None = None
     seed: int | None = None
+
+    @model_validator(mode="after")
+    def ensure_render_anchor(self) -> "GenerationRequest":
+        if self.reference_id is None and self.voice_profile_id is None:
+            raise ValueError("A generation request needs either a reference voice or a voice profile.")
+        return self
 
 
 class GenerationEstimate(BaseModel):
@@ -152,6 +180,7 @@ class ProjectSummary(BaseModel):
 class ProjectDetail(ProjectSummary):
     references: list[VoiceAssetView] = Field(default_factory=list)
     styles: list[VoiceAssetView] = Field(default_factory=list)
+    voice_profiles: list[VoiceProfileView] = Field(default_factory=list)
     assets: list[AudioAssetView] = Field(default_factory=list)
     jobs: list[GenerationJobView] = Field(default_factory=list)
     pronunciation_rules: list[PronunciationRuleView] = Field(default_factory=list)

@@ -197,6 +197,8 @@ On Apple Silicon, the studio Settings tab can now point inference at a local fin
 Recent studio upgrades:
 
 - direct `Voices` page for text-to-speech with either the shipped base model or a saved finetune checkpoint
+- multi-reference `VoiceProfile` support so the studio can auto-pick the strongest clip from a curated speaker profile instead of forcing one manual reference every time
+- trained-voice page now has its own text-to-speech lane, using the selected checkpoint together with a whole voice profile when you want the strongest local speaker match
 - `Diagnostics` page with reference scoring and take QA against the requested transcript
 - alignment-first `Edit` page with replace, delete, insert-before, and insert-after actions
 - seed lock controls on render pages so takes can be reproduced instead of drifting every run

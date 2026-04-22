@@ -142,6 +142,78 @@ class StudioServiceTests(unittest.TestCase):
         self.assertEqual(report["transcript_backend"], "manual")
         self.assertIsNotNone(report["word_error_rate"])
 
+    def test_voice_profile_resolves_best_reference_for_render(self):
+        def fake_analysis(audio_path: str, transcript: str = "", backend: str = "auto", **_kwargs):
+            quality_score = 96.0 if "calm" in transcript else 84.0
+            return ReferenceAnalysis(
+                transcript=transcript or "hello from the reference",
+                duration_seconds=8.5 if "calm" in transcript else 5.0,
+                sample_rate=24000,
+                channels=1,
+                rms=0.04,
+                peak=0.7,
+                trailing_silence_seconds=0.3,
+                speech_seconds=6.8 if "calm" in transcript else 4.4,
+                speech_ratio=0.82 if "calm" in transcript else 0.74,
+                backend="manual",
+                quality_score=quality_score,
+                quality_rating="excellent" if quality_score >= 90 else "good",
+                warnings=[],
+                notes=["ok"],
+            )
+
+        self.service.engine.analyze_reference = fake_analysis
+        project = self.service.list_projects()[0]
+        calm_reference, _ = self.service.ingest_reference(project["id"], "Calm Anchor", str(self.audio_path), "calm steady narrator")
+        brisk_reference, _ = self.service.ingest_reference(project["id"], "Brisk Anchor", str(self.audio_path), "fast energetic promo")
+
+        profile = self.service.save_voice_profile(
+            project["id"],
+            "Narrator Profile",
+            [brisk_reference["id"], calm_reference["id"]],
+            description="Curated for narration",
+        )
+        recommendations = self.service.recommend_profile_references(
+            profile["id"],
+            context_notes="calm narrator",
+            text="This should sound measured and steady.",
+        )
+        self.assertEqual(recommendations[0]["id"], calm_reference["id"])
+
+        output_path = self.paths.projects / project["slug"] / "outputs" / "profile.wav"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        write_test_tone(output_path, seconds=0.8)
+
+        def fake_render(request, reference, style, pronunciation_rules, output_dir, **_kwargs):
+            return {
+                "audio_path": str(output_path),
+                "spectrogram_path": None,
+                "duration_seconds": 0.8,
+                "elapsed_seconds": 0.2,
+                "sample_rate": 24000,
+                "text_excerpt": request.text[:40],
+                "effective_speed": 0.95,
+                "nfe_step": 20,
+                "seed": 1234,
+                "style_notes": [],
+            }
+
+        self.service.engine.render = fake_render
+        job = self.service.render_now(
+            GenerationRequest(
+                project_id=project["id"],
+                voice_profile_id=profile["id"],
+                text="This should sound measured and steady.",
+                name="Profile Render",
+                mode="final",
+                context_notes="calm narrator",
+            )
+        )
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["result"]["reference_id"], calm_reference["id"])
+        self.assertEqual(job["result"]["voice_profile_id"], profile["id"])
+        self.assertEqual(job["result"]["resolved_reference_name"], "Calm Anchor")
+
 
 if __name__ == "__main__":
     unittest.main()

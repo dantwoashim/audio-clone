@@ -86,6 +86,25 @@ class StudioApiTests(unittest.TestCase):
         self.assertEqual(payload["asset"]["name"], "Lead")
         self.assertEqual(payload["analysis"]["transcript"], "api transcript")
 
+        profile_response = self.client.post(
+            "/api/v1/voice-profiles",
+            json={
+                "project_id": project["id"],
+                "name": "Profile One",
+                "description": "all references",
+                "reference_ids": [payload["asset"]["id"]],
+            },
+        )
+        self.assertEqual(profile_response.status_code, 200)
+        profile = profile_response.json()
+        self.assertEqual(profile["name"], "Profile One")
+        self.assertEqual(profile["member_count"], 1)
+
+        list_response = self.client.get(f"/api/v1/projects/{project['id']}/voice-profiles")
+        self.assertEqual(list_response.status_code, 200)
+        profiles = list_response.json()
+        self.assertTrue(any(item["name"] == "Profile One" for item in profiles))
+
     def test_token_auth_protects_api_when_enabled(self):
         os.environ["F5_TTS_STUDIO_TOKEN"] = "secret"
         with TestClient(create_server_app(mount_studio=False, service=self.service)) as authed_client:

@@ -54,8 +54,10 @@ The upgraded studio keeps the core cloning flow obvious while adding a real proj
 
 - create or select a project
 - save reference voices with local analysis and transcript confirmation
+- group multiple clean references into a `VoiceProfile` so the app can auto-pick the best member clip for the requested delivery
 - save style prompts for pacing and delivery reuse
 - run quick previews or final renders
+- render directly from the dedicated `Trained Voice` page using the chosen checkpoint plus a whole voice profile
 - queue batches one job at a time for shared-device safety
 - compare takes and export share bundles
 
