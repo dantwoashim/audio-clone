@@ -14,7 +14,7 @@ Use this section to document only the work actually done in this repository, for
 - documentation notes
 - small bug fixes
 
-If this repository is mostly unchanged from upstream, label it as a learning experiment or archive it so recruiters do not mistake upstream research for original work.
+If this repository is mostly unchanged from upstream, label it as a learning experiment or archive it so upstream research is not mistaken for original work.
 
 ## Ethical usage note
 
