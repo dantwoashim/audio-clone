@@ -1,3 +1,36 @@
+# audio-clone
+
+> Learning/experiment repository based on the upstream F5-TTS project. This repository should not be presented as original model research by Prabin Ghimire.
+
+This project is an adaptation/experiment around [F5-TTS](https://github.com/SWivid/F5-TTS), an upstream open-source text-to-speech and voice-cloning project. The model architecture, pretrained model work, paper, and original research credit belong to the upstream authors and contributors.
+
+## My contribution
+
+Use this section to document only the work actually done in this repository, for example:
+
+- setup or environment fixes
+- UI or workflow experiments
+- integration/deployment experiments
+- documentation notes
+- small bug fixes
+
+If this repository is mostly unchanged from upstream, label it as a learning experiment or archive it so recruiters do not mistake upstream research for original work.
+
+## Ethical usage note
+
+Voice cloning can be misused for impersonation, fraud, harassment, or non-consensual content. Use this project only with voices you have the right to use, with clear consent, and with appropriate disclosure. Do not use it to imitate real people without permission.
+
+## Limitations
+
+- This repository is not a claim of original TTS model research.
+- Generated voice quality and safety depend on upstream models and configuration.
+- The project may require significant compute and careful dependency setup.
+- Check the upstream license and model terms before redistribution or deployment.
+
+---
+
+# Upstream README: F5-TTS
+
 # F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
 
 [![python](https://img.shields.io/badge/Python-3.10-brightgreen)](https://github.com/SWivid/F5-TTS)
