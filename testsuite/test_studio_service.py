@@ -164,8 +164,12 @@ class StudioServiceTests(unittest.TestCase):
 
         self.service.engine.analyze_reference = fake_analysis
         project = self.service.list_projects()[0]
-        calm_reference, _ = self.service.ingest_reference(project["id"], "Calm Anchor", str(self.audio_path), "calm steady narrator")
-        brisk_reference, _ = self.service.ingest_reference(project["id"], "Brisk Anchor", str(self.audio_path), "fast energetic promo")
+        calm_reference, _ = self.service.ingest_reference(
+            project["id"], "Calm Anchor", str(self.audio_path), "calm steady narrator"
+        )
+        brisk_reference, _ = self.service.ingest_reference(
+            project["id"], "Brisk Anchor", str(self.audio_path), "fast energetic promo"
+        )
 
         profile = self.service.save_voice_profile(
             project["id"],
