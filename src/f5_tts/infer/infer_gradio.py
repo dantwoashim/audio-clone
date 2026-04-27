@@ -756,11 +756,11 @@ with gr.Blocks() as app_chat:
     gr.Markdown(
         """
 # Voice Chat
-Have a conversation with an AI using your reference voice!
+Have a conversation using your reference voice.
 1. Upload a reference audio clip and optionally its transcript (via text or .txt file).
 2. Load the chat model.
 3. Record your message through your microphone or type it.
-4. The AI will respond using the reference voice.
+4. The reply will be rendered with the reference voice.
 """
     )
 
@@ -839,7 +839,7 @@ Have a conversation with an AI using your reference voice!
                     )
                     system_prompt_chat = gr.Textbox(
                         label="System Prompt",
-                        value="You are not an AI assistant, you are whoever the user says you are. You must stay in character. Keep your responses concise since they will be spoken out loud.",
+                        value="You are whoever the user says you are. Stay in character and keep responses concise because they will be spoken aloud.",
                         lines=2,
                     )
 
@@ -881,7 +881,7 @@ Have a conversation with an AI using your reference voice!
         # Use model and tokenizer from state to get text response
         @gpu_decorator
         def generate_text_response(conv_state, system_prompt):
-            """Generate text response from AI"""
+            """Generate text response for the conversation"""
             for single_state in conv_state:
                 if isinstance(single_state["content"], list):
                     assert len(single_state["content"]) == 1 and single_state["content"][0]["type"] == "text"
@@ -895,12 +895,12 @@ Have a conversation with an AI using your reference voice!
 
         @gpu_decorator
         def generate_audio_response(conv_state, ref_audio, ref_text, remove_silence, randomize_seed, seed_input):
-            """Generate TTS audio for AI response"""
+            """Generate speech for the latest response"""
             if not conv_state or not ref_audio:
                 return None, ref_text, seed_input
 
-            last_ai_response = conv_state[-1]["content"][0]["text"]
-            if not last_ai_response or conv_state[-1]["role"] != "assistant":
+            last_response_text = conv_state[-1]["content"][0]["text"]
+            if not last_response_text or conv_state[-1]["role"] != "assistant":
                 return None, ref_text, seed_input
 
             if randomize_seed:
@@ -909,7 +909,7 @@ Have a conversation with an AI using your reference voice!
             audio_result, _, ref_text_out, used_seed = infer(
                 ref_audio,
                 ref_text,
-                last_ai_response,
+                last_response_text,
                 tts_model_choice,
                 remove_silence,
                 seed=seed_input,

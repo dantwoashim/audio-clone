@@ -60,10 +60,12 @@ train = [
     "wandb",
 ]
 apple_audio = [
+    "f5-tts-mlx>=0.2.6",
     "mlx-whisper>=0.2.0",
     "silero-vad>=5.1.2",
 ]
 apple = [
+    "f5-tts-mlx>=0.2.6",
     "mlx-whisper>=0.2.0",
     "silero-vad>=5.1.2",
 ]

@@ -1,242 +1,224 @@
-# audio-clone
+# Audio Clone Studio
 
-> Learning/experiment repository based on the upstream F5-TTS project. This repository should not be presented as original model research by Prabin Ghimire.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-111827)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-0F766E)](#installation)
 
-This project is an adaptation/experiment around [F5-TTS](https://github.com/SWivid/F5-TTS), an upstream open-source text-to-speech and voice-cloning project. The model architecture, pretrained model work, paper, and original research credit belong to the upstream authors and contributors.
+Audio Clone Studio is a local-first voice cloning and speech production workspace built on top of the F5-TTS stack. It combines fast reference-based synthesis, project-aware asset management, trained voice checkpoints, reusable voice profiles, batch rendering, aligned speech editing, diagnostics, and a polished browser studio in one repository.
 
-## My contribution
+This repository is designed for practical production work:
 
-Use this section to document only the work actually done in this repository, for example:
+- clone and render from curated reference clips
+- manage reusable voice profiles and style prompts
+- switch between shipped base models and local trained checkpoints
+- queue preview and final renders safely on shared hardware
+- perform transcript-aligned speech edits instead of destructive full rerenders
+- review takes with diagnostics, comparison views, and export bundles
+- serve the studio locally or mount it behind a small FastAPI service
 
-- setup or environment fixes
-- UI or workflow experiments
-- integration/deployment experiments
-- documentation notes
-- small bug fixes
+## Highlights
 
-If this repository is mostly unchanged from upstream, label it as a learning experiment or archive it so upstream research is not mistaken for original work.
+- **Voice Studio**: project-based browser workspace for references, styles, profiles, takes, and exports
+- **Trained Voice Workflow**: route renders through a local finetuned checkpoint with profile-based reference selection
+- **Voice Profiles**: group multiple clean references so the app can choose the best clip per render
+- **Editing Tools**: alignment-first replace, insert, and delete actions with localized rerendering
+- **Batch and Queueing**: render long scripts one job at a time on constrained machines
+- **Diagnostics**: transcript drift checks, silence checks, reference scoring, and take review helpers
+- **Apple Silicon Support**: Apple-friendly transcription extras and an optional MLX backend for shipped base-model inference
+- **API Mode**: optional FastAPI server with mounted studio UI and local REST endpoints
 
-## Ethical usage note
+## What’s Included
 
-Voice cloning can be misused for impersonation, fraud, harassment, or non-consensual content. Use this project only with voices you have the right to use, with clear consent, and with appropriate disclosure. Do not use it to imitate real people without permission.
+### User-Facing Apps
 
-## Limitations
+- `f5-tts_voice-studio`
+  The main browser studio for cloning, rendering, editing, and export.
 
-- This repository is not a claim of original TTS model research.
-- Generated voice quality and safety depend on upstream models and configuration.
-- The project may require significant compute and careful dependency setup.
-- Check the upstream license and model terms before redistribution or deployment.
+- `f5-tts_infer-gradio`
+  The broader inference demo with multi-style and multi-speaker utilities.
 
----
+- `f5-tts_studio-server`
+  FastAPI server that exposes the studio UI under `/app` and API routes under `/api/v1`.
 
-# Upstream README: F5-TTS
+### Production Workflows
 
-# F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
-
-[![python](https://img.shields.io/badge/Python-3.10-brightgreen)](https://github.com/SWivid/F5-TTS)
-[![arXiv](https://img.shields.io/badge/arXiv-2410.06885-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2410.06885)
-[![demo](https://img.shields.io/badge/GitHub-Demo-orange.svg)](https://swivid.github.io/F5-TTS/)
-[![hfspace](https://img.shields.io/badge/🤗-HF%20Space-yellow)](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
-[![msspace](https://img.shields.io/badge/🤖-MS%20Space-blue)](https://modelscope.cn/studios/AI-ModelScope/E2-F5-TTS)
-[![lab](https://img.shields.io/badge/🏫-X--LANCE-grey?labelColor=lightgrey)](https://x-lance.sjtu.edu.cn/)
-[![lab](https://img.shields.io/badge/🏫-SII-grey?labelColor=lightgrey)](https://www.sii.edu.cn/)
-[![lab](https://img.shields.io/badge/🏫-PCL-grey?labelColor=lightgrey)](https://www.pcl.ac.cn)
-<!-- <img src="https://github.com/user-attachments/assets/12d7749c-071a-427c-81bf-b87b91def670" alt="Watermark" style="width: 40px; height: auto"> -->
-
-**F5-TTS**: Diffusion Transformer with ConvNeXt V2, faster trained and inference.
-
-**E2 TTS**: Flat-UNet Transformer, closest reproduction from [paper](https://arxiv.org/abs/2406.18009).
-
-**Sway Sampling**: Inference-time flow step sampling strategy, greatly improves performance
-
-### Thanks to all the contributors !
-
-## News
-- **2025/03/12**: 🔥 F5-TTS v1 base model with better training and inference performance. [Few demo](https://swivid.github.io/F5-TTS_updates).
-- **2024/10/08**: F5-TTS & E2 TTS base models on [🤗 Hugging Face](https://huggingface.co/SWivid/F5-TTS), [🤖 Model Scope](https://www.modelscope.cn/models/SWivid/F5-TTS_Emilia-ZH-EN), [🟣 Wisemodel](https://wisemodel.cn/models/SJTU_X-LANCE/F5-TTS_Emilia-ZH-EN).
+- short-form and long-form voice cloning
+- trained checkpoint auditioning
+- project-scoped pronunciation dictionaries
+- style prompt reuse
+- batch render pipelines
+- take comparison and export packaging
+- transcript-aligned speech editing
 
 ## Installation
 
-### Create a separate environment if needed
+### 1. Create an environment
 
 ```bash
-# Create a conda env with python_version>=3.10  (you could also use virtualenv)
-conda create -n f5-tts python=3.11
-conda activate f5-tts
-
-# Install FFmpeg if you haven't yet
-conda install ffmpeg
+python -m venv .venv
+source .venv/bin/activate
 ```
 
-### Install PyTorch with matched device
+If you prefer Conda:
 
-<details>
-<summary>NVIDIA GPU</summary>
-
-> ```bash
-> # Install pytorch with your CUDA version, e.g.
-> pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-> 
-> # And also possible previous versions, e.g.
-> pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
-> # etc.
-> ```
-
-</details>
-
-<details>
-<summary>AMD GPU</summary>
-
-> ```bash
-> # Install pytorch with your ROCm version (Linux only), e.g.
-> pip install torch==2.5.1+rocm6.2 torchaudio==2.5.1+rocm6.2 --extra-index-url https://download.pytorch.org/whl/rocm6.2
-> ```
-
-</details>
-
-<details>
-<summary>Intel GPU</summary>
-
-> ```bash
-> # Install pytorch with your XPU version, e.g.
-> # Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit must be installed
-> pip install torch torchaudio --index-url https://download.pytorch.org/whl/test/xpu
-> 
-> # Intel GPU support is also available through IPEX (Intel® Extension for PyTorch)
-> # IPEX does not require the Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit
-> # See: https://pytorch-extension.intel.com/installation?request=platform
-> ```
-
-</details>
-
-<details>
-<summary>Apple Silicon</summary>
-
-> ```bash
-> # Install the stable pytorch, e.g.
-> pip install torch torchaudio
-> ```
-
-</details>
-
-### Then you can choose one from below:
-
-> ### 1. As a pip package (if just for inference)
-> 
-> ```bash
-> pip install f5-tts
-> ```
-> 
-> ### 2. Local editable (if also do training, finetuning)
-> 
-> ```bash
-> git clone https://github.com/SWivid/F5-TTS.git
-> cd F5-TTS
-> # git submodule update --init --recursive  # (optional, if use bigvgan as vocoder)
-> pip install -e ".[studio]"
-> ```
->
-> ### 3. Apple-Silicon helper extras (optional, recommended for the upgraded studio)
->
-> ```bash
-> pip install -e ".[studio,apple_audio]"
-> ```
->
-> ### 4. Training extras (optional)
->
-> ```bash
-> pip install -e ".[train]"
-> ```
-
-### Docker usage also available
 ```bash
-# Build from Dockerfile
-docker build -t f5tts:v1 .
-
-# Run from GitHub Container Registry
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main
-
-# Quickstart if you want to just run the web interface (not CLI)
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main f5-tts_infer-gradio --host 0.0.0.0
+conda create -n audio-clone python=3.11
+conda activate audio-clone
 ```
 
-### Runtime
+### 2. Install FFmpeg
 
-Deployment solution with Triton and TensorRT-LLM.
+FFmpeg is required for reference preparation, audio decoding, and several export paths.
 
-#### Benchmark Results
-Decoding on a single L20 GPU, using 26 different prompt_audio & target_text pairs, 16 NFE.
-
-| Model               | Concurrency    | Avg Latency | RTF    | Mode            |
-|---------------------|----------------|-------------|--------|-----------------|
-| F5-TTS Base (Vocos) | 2              | 253 ms      | 0.0394 | Client-Server   |
-| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.0402 | Offline TRT-LLM |
-| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.1467 | Offline Pytorch |
-
-See [detailed instructions](src/f5_tts/runtime/triton_trtllm/README.md) for more information.
-
-
-## Inference
-
-- In order to achieve desired performance, take a moment to read [detailed guidance](src/f5_tts/infer).
-- By properly searching the keywords of problem encountered, [issues](https://github.com/SWivid/F5-TTS/issues?q=is%3Aissue) are very helpful.
-
-### 1. Gradio App
-
-Currently supported features:
-
-- Basic TTS with Chunk Inference
-- Multi-Style / Multi-Speaker Generation
-- Voice Chat powered by Qwen2.5-3B-Instruct
-- Voice Studio Pro for a local-first voice-cloning workflow with projects, saved references, saved style prompts, queue-backed batch jobs, A/B compare, pronunciation rules, diagnostics, aligned speech editing, export bundles, and an optional FastAPI server
-- [Custom inference with more language support](src/f5_tts/infer/SHARED.md)
+macOS:
 
 ```bash
-# Launch a Gradio app (web interface)
-f5-tts_infer-gradio
+brew install ffmpeg
+```
 
-# Launch the streamlined Voice Studio app
+Ubuntu / Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install ffmpeg
+```
+
+### 3. Install PyTorch for your machine
+
+Apple Silicon:
+
+```bash
+pip install torch torchaudio
+```
+
+NVIDIA:
+
+```bash
+pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+### 4. Install the project
+
+Studio install:
+
+```bash
+pip install -e ".[studio]"
+```
+
+Apple-Silicon studio install:
+
+```bash
+pip install -e ".[studio,apple_audio]"
+```
+
+Training extras:
+
+```bash
+pip install -e ".[train]"
+```
+
+Development extras:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Quick Start
+
+### Launch the main studio
+
+```bash
 f5-tts_voice-studio
-
-# Launch the FastAPI server and mount the studio under /app with API routes under /api/v1
-f5-tts_studio-server
-
-# Launch Voice Studio and expose it with a Cloudflare Quick Tunnel
-./scripts/voice_studio_quick_tunnel.sh
-
-# Launch Voice Studio and expose it with zrok
-# First run needs a free token from https://myzrok.io
-ZROK_ENABLE_TOKEN=your_token ./scripts/voice_studio_zrok.sh
-
-# Optional: reserve a stable public name the first time
-ZROK_ENABLE_TOKEN=your_token ZROK_UNIQUE_NAME=your-name ./scripts/voice_studio_zrok.sh
-
-# Specify the port/host
-f5-tts_infer-gradio --port 7860 --host 0.0.0.0
-
-# Launch a share link
-f5-tts_infer-gradio --share
 ```
 
-Voice Studio Pro stores its local library outside the repo:
+### Launch the API server
 
-- macOS support data: `~/Library/Application Support/F5-TTS-Studio`
-- macOS cache: `~/Library/Caches/F5-TTS-Studio`
+```bash
+f5-tts_studio-server
+```
 
-That keeps project references, styles, takes, exports, and the local SQLite library portable without polluting the working tree.
+### Launch the broader inference demo
 
-On Apple Silicon, the studio Settings tab can now point inference at a local finetune checkpoint such as `ckpts/<project>/model_last.pt` while keeping the base model as the fallback. If the checkpoint is very early in training, try turning off `Use EMA weights` in the same panel before judging the voice quality.
+```bash
+f5-tts_infer-gradio
+```
 
-Recent studio upgrades:
+### Command-line generation
 
-- direct `Voices` page for text-to-speech with either the shipped base model or a saved finetune checkpoint
-- multi-reference `VoiceProfile` support so the studio can auto-pick the strongest clip from a curated speaker profile instead of forcing one manual reference every time
-- trained-voice page now has its own text-to-speech lane, using the selected checkpoint together with a whole voice profile when you want the strongest local speaker match
-- `Diagnostics` page with reference scoring and take QA against the requested transcript
-- alignment-first `Edit` page with replace, delete, insert-before, and insert-after actions
-- seed lock controls on render pages so takes can be reproduced instead of drifting every run
+```bash
+f5-tts_infer-cli \
+  --model F5TTS_v1_Base \
+  --ref_audio "ref_audio.wav" \
+  --ref_text "Reference transcript." \
+  --gen_text "Text to render."
+```
 
-For safer sharing, the studio now supports optional auth and upload limits through environment variables:
+## Studio Workflow
+
+### 1. Create a project
+
+Start with a project in the studio and keep related references, styles, renders, and exports together.
+
+### 2. Save clean references
+
+Add short, clean clips with confirmed transcripts. The studio can analyze and score them for later reuse.
+
+### 3. Build a voice profile
+
+Group several strong references from the same speaker. The studio can then pick the most suitable clip automatically for each render.
+
+### 4. Add style prompts
+
+Save alternate delivery examples for pacing, tone, or mood so they can be reused across scripts.
+
+### 5. Render
+
+Use:
+
+- **Quick Preview** for faster iteration
+- **Final Render** for higher-quality delivery
+- **Voices** for direct text-to-speech with a saved profile or single reference
+- **Trained Voice** for checkpoint-based rendering
+
+### 6. Review and export
+
+Compare takes, run diagnostics, and export WAV, MP3, transcripts, or packaged bundles.
+
+## Apple Silicon Notes
+
+On Apple Silicon, the studio supports:
+
+- `mlx-whisper` for local transcription
+- optional `Apple MLX F5-TTS` base-model inference from the Runtime panel
+- automatic fallback to PyTorch when a local finetuned checkpoint is selected
+
+Recommended install:
+
+```bash
+pip install -e ".[studio,apple_audio]"
+```
+
+## Local Data Locations
+
+The studio stores project data outside the repository.
+
+macOS:
+
+- support data: `~/Library/Application Support/F5-TTS-Studio`
+- cache: `~/Library/Caches/F5-TTS-Studio`
+
+This keeps references, profiles, takes, exports, and the local library out of the working tree.
+
+## Sharing
+
+For temporary remote access, the repository includes helper scripts for local tunnel workflows:
+
+```bash
+./scripts/voice_studio_quick_tunnel.sh
+./scripts/voice_studio_zrok.sh
+```
+
+The studio can also enforce optional access controls through environment variables:
 
 ```bash
 export F5_TTS_STUDIO_USERNAME=demo
@@ -245,122 +227,52 @@ export F5_TTS_STUDIO_TOKEN=optional-api-token
 export F5_TTS_MAX_UPLOAD_MB=64
 ```
 
-`F5_TTS_STUDIO_USERNAME` and `F5_TTS_STUDIO_PASSWORD` enable basic auth for the mounted server and the standalone studio launcher. `F5_TTS_STUDIO_TOKEN` can also protect the FastAPI server with a header or query token (`X-F5-TTS-Token` or `?access_token=`).
+## Repository Layout
 
-<details>
-<summary>NVIDIA device docker compose file example</summary>
+```text
+src/f5_tts/
+  api.py                 Public Python API
+  infer/                 Inference entrypoints and demos
+  studio/                Voice Studio app, runtime, storage, API, editing
+  model/                 Model and trainer code
+  train/                 Finetuning entrypoints
+  runtime/               Deployment integrations
 
-```yaml
-services:
-  f5-tts:
-    image: ghcr.io/swivid/f5-tts:main
-    ports:
-      - "7860:7860"
-    environment:
-      GRADIO_SERVER_PORT: 7860
-    entrypoint: ["f5-tts_infer-gradio", "--port", "7860", "--host", "0.0.0.0"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-volumes:
-  f5-tts:
-    driver: local
+scripts/                 Local launch and sharing helpers
+testsuite/               Test coverage for studio and service flows
+ckpts/                   Optional local checkpoints
 ```
 
-</details>
+## Development Commands
 
-### 2. CLI Inference
+Syntax check:
 
 ```bash
-# Run with flags
-# Leave --ref_text "" will have ASR model transcribe (extra GPU memory usage)
-f5-tts_infer-cli --model F5TTS_v1_Base \
---ref_audio "provide_prompt_wav_path_here.wav" \
---ref_text "The content, subtitle or transcription of reference audio." \
---gen_text "Some text you want TTS model generate for you."
-
-# Run with default setting. src/f5_tts/infer/examples/basic/basic.toml
-f5-tts_infer-cli
-# Or with your own .toml file
-f5-tts_infer-cli -c custom.toml
-
-# Multi voice. See src/f5_tts/infer/README.md
-f5-tts_infer-cli -c src/f5_tts/infer/examples/multi/story.toml
+python -m py_compile src/f5_tts/api.py
 ```
 
-
-## Training
-
-### 1. With Hugging Face Accelerate
-
-Refer to [training & finetuning guidance](src/f5_tts/train) for best practice.
-
-### 2. With Gradio App
+Run targeted tests:
 
 ```bash
-# Quick start with Gradio web interface
-f5-tts_finetune-gradio
+python -m unittest -v testsuite.test_studio_service
 ```
 
-Read [training & finetuning guidance](src/f5_tts/train) for more instructions.
-
-
-## [Evaluation](src/f5_tts/eval)
-
-
-## Development
-
-Use pre-commit to ensure code quality (will run linters and formatters automatically):
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-For the new studio tests:
+Run the full test suite:
 
 ```bash
 python -m unittest discover -s testsuite
 ```
 
-When making a pull request, before each commit, run: 
+## Training
+
+Finetuning entrypoints are available when training extras are installed:
 
 ```bash
-pre-commit run --all-files
+f5-tts_finetune-cli
+f5-tts_finetune-gradio
 ```
 
-Note: Some model components have linting exceptions for E722 to accommodate tensor notation.
+For a deeper walkthrough of inference usage, examples, and editing tools, see:
 
-
-## Acknowledgements
-
-- [E2-TTS](https://arxiv.org/abs/2406.18009) brilliant work, simple and effective
-- [Emilia](https://arxiv.org/abs/2407.05361), [WenetSpeech4TTS](https://arxiv.org/abs/2406.05763), [LibriTTS](https://arxiv.org/abs/1904.02882), [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) valuable datasets
-- [lucidrains](https://github.com/lucidrains) initial CFM structure with also [bfs18](https://github.com/bfs18) for discussion
-- [SD3](https://arxiv.org/abs/2403.03206) & [Hugging Face diffusers](https://github.com/huggingface/diffusers) DiT and MMDiT code structure
-- [torchdiffeq](https://github.com/rtqichen/torchdiffeq) as ODE solver, [Vocos](https://huggingface.co/charactr/vocos-mel-24khz) and [BigVGAN](https://github.com/NVIDIA/BigVGAN) as vocoder
-- [FunASR](https://github.com/modelscope/FunASR), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [UniSpeech](https://github.com/microsoft/UniSpeech), [SpeechMOS](https://github.com/tarepan/SpeechMOS) for evaluation tools
-- [ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner) for speech edit test
-- [mrfakename](https://x.com/realmrfakename) huggingface space demo ~
-- [f5-tts-mlx](https://github.com/lucasnewman/f5-tts-mlx/tree/main) Implementation with MLX framework by [Lucas Newman](https://github.com/lucasnewman)
-- [F5-TTS-ONNX](https://github.com/DakeQQ/F5-TTS-ONNX) ONNX Runtime version by [DakeQQ](https://github.com/DakeQQ)
-- [Yuekai Zhang](https://github.com/yuekaizhang) Triton and TensorRT-LLM support ~
-
-## Citation
-If our work and codebase is useful for you, please cite as:
-```
-@article{chen-etal-2024-f5tts,
-      title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching}, 
-      author={Yushen Chen and Zhikang Niu and Ziyang Ma and Keqi Deng and Chunhui Wang and Jian Zhao and Kai Yu and Xie Chen},
-      journal={arXiv preprint arXiv:2410.06885},
-      year={2024},
-}
-```
-## License
-
-Our code is released under MIT License. The pre-trained models are licensed under the CC-BY-NC license due to the training data Emilia, which is an in-the-wild dataset. Sorry for any inconvenience this may cause.
+- [Inference Guide](src/f5_tts/infer/README.md)
+- [Runtime Deployment Notes](src/f5_tts/runtime/triton_trtllm/README.md)

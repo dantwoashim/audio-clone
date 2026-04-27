@@ -214,6 +214,31 @@ class StudioServiceTests(unittest.TestCase):
         self.assertEqual(job["result"]["voice_profile_id"], profile["id"])
         self.assertEqual(job["result"]["resolved_reference_name"], "Calm Anchor")
 
+    def test_mlx_backend_selection_and_checkpoint_fallback(self):
+        self.service.engine.mlx_available = lambda: True
+        self.service.set_inference_backend("mlx")
+
+        base_request = GenerationRequest(
+            project_id=self.service.list_projects()[0]["id"],
+            reference_id=1,
+            text="Base model request",
+        )
+        base_options = self.service._engine_options_for_request(base_request)
+        self.assertEqual(base_options["backend"], "mlx")
+        self.assertIsNone(base_options["backend_reason"])
+
+        checkpoint_path = self.base / "dummy.safetensors"
+        checkpoint_path.write_bytes(b"checkpoint")
+        checkpoint_request = GenerationRequest(
+            project_id=self.service.list_projects()[0]["id"],
+            reference_id=1,
+            text="Checkpoint request",
+            checkpoint_path=str(checkpoint_path),
+        )
+        checkpoint_options = self.service._engine_options_for_request(checkpoint_request)
+        self.assertEqual(checkpoint_options["backend"], "pytorch")
+        self.assertIn("base model", checkpoint_options["backend_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -599,6 +599,7 @@ def _page_intro_html(kicker: str, title: str, body: str) -> str:
 def _project_overview_html(project: dict, system_profile: dict) -> str:
     description = project.get("description") or "No project description yet. Add one when this becomes a real delivery lane."
     checkpoint_label = _current_voice_label(system_profile)
+    backend_label = system_profile.get("inference_backend_label") or "PyTorch F5-TTS"
     stats = [
         ("Saved references", str(len(project["references"]))),
         ("Voice profiles", str(len(project.get("voice_profiles", [])))),
@@ -628,6 +629,10 @@ def _project_overview_html(project: dict, system_profile: dict) -> str:
           <span>{html.escape(checkpoint_label)}</span>
         </div>
         <div class="studio-mini">
+          <strong>Backend</strong>
+          <span>{html.escape(backend_label)}</span>
+        </div>
+        <div class="studio-mini">
           <strong>Device</strong>
           <span>{html.escape(str(system_profile.get('device', 'unknown')).upper())}</span>
         </div>
@@ -645,6 +650,13 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
     checkpoint_path = system_profile.get("checkpoint_path")
     checkpoint_note = Path(checkpoint_path).name if checkpoint_path else "Using the shipped base checkpoint."
     asr_model = system_profile.get("asr_model") or "auto"
+    backend_label = system_profile.get("inference_backend_label") or "PyTorch F5-TTS"
+    backend_reason = system_profile.get("inference_backend_reason")
+    backend_note = (
+        f"{backend_label}. {backend_reason}"
+        if backend_reason
+        else backend_label
+    )
     warm_note = (
         f"<div class=\"studio-mini\"><strong>Warm-up</strong><span>{html.escape(system_profile['last_warm_error'])}</span></div>"
         if system_profile.get("last_warm_error")
@@ -656,6 +668,7 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
         <p class="studio-eyebrow">Render runtime</p>
         <h2>{html.escape(checkpoint_label)}</h2>
         <p>{html.escape(checkpoint_note)}</p>
+        <p>{html.escape(backend_note)}</p>
       </div>
       <div class="studio-mini-grid">
         <div class="studio-mini">
@@ -669,6 +682,10 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
         <div class="studio-mini">
           <strong>Engine</strong>
           <span>{"Warm" if system_profile.get("engine_loaded") else "Cold"}</span>
+        </div>
+        <div class="studio-mini">
+          <strong>Backend</strong>
+          <span>{html.escape(backend_label)}</span>
         </div>
         <div class="studio-mini">
           <strong>ASR</strong>
@@ -832,43 +849,61 @@ def _checkpoint_choice_pairs(paths: list[str]) -> list[tuple[str, str]]:
     return choices
 
 
-def _serialize_voice_model(checkpoint_path: str | None, use_ema: bool) -> str:
-    return json.dumps({"checkpoint_path": checkpoint_path or "", "use_ema": bool(use_ema)}, sort_keys=True)
+def _serialize_voice_model(checkpoint_path: str | None, use_ema: bool, backend: str | None = None) -> str:
+    return json.dumps(
+        {
+            "checkpoint_path": checkpoint_path or "",
+            "use_ema": bool(use_ema),
+            "backend": backend or "",
+        },
+        sort_keys=True,
+    )
 
 
-def _deserialize_voice_model(value: str | None) -> tuple[str | None, bool | None]:
+def _deserialize_voice_model(value: str | None) -> tuple[str | None, bool | None, str | None]:
     if not value:
-        return None, None
+        return None, None, None
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
-        return None, None
+        return None, None, None
     checkpoint_path = str(payload.get("checkpoint_path", "") or "").strip() or ""
     use_ema = payload.get("use_ema")
-    return checkpoint_path, None if use_ema is None else bool(use_ema)
+    backend = str(payload.get("backend", "") or "").strip() or None
+    return checkpoint_path, None if use_ema is None else bool(use_ema), backend
 
 
 def _voice_model_choices(system_profile: dict, checkpoint_choices: list[tuple[str, str]]) -> list[tuple[str, str]]:
     choices: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    def add(label: str, checkpoint_path: str | None, use_ema: bool) -> None:
-        value = _serialize_voice_model(checkpoint_path, use_ema)
+    def add(label: str, checkpoint_path: str | None, use_ema: bool, backend: str | None = None) -> None:
+        value = _serialize_voice_model(checkpoint_path, use_ema, backend=backend)
         if value in seen:
             return
         seen.add(value)
         choices.append((label, value))
 
-    current_label = f"Current runtime · {_current_voice_label(system_profile)}"
-    add(current_label, system_profile.get("checkpoint_path"), bool(system_profile.get("use_ema", True)))
-    add("Base model · shipped", "", True)
+    current_label = (
+        f"Current runtime · {_current_voice_label(system_profile)} · "
+        f"{system_profile.get('inference_backend_label', 'PyTorch F5-TTS')}"
+    )
+    add(
+        current_label,
+        system_profile.get("checkpoint_path"),
+        bool(system_profile.get("use_ema", True)),
+        backend=system_profile.get("effective_inference_backend"),
+    )
+    if system_profile.get("mlx_available"):
+        add("Base model · Apple MLX", "", True, backend="mlx")
+    add("Base model · PyTorch", "", True, backend="pytorch")
 
     for label, checkpoint_path in checkpoint_choices:
         if not checkpoint_path:
             continue
         lowered = checkpoint_path.lower()
         inferred_use_ema = "noema" not in lowered
-        add(f"Checkpoint · {label}", checkpoint_path, inferred_use_ema)
+        add(f"Checkpoint · {label}", checkpoint_path, inferred_use_ema, backend="pytorch")
 
     return choices
 
@@ -1272,6 +1307,7 @@ def create_studio_app():
         seed: int,
         checkpoint_override: str | None = None,
         use_ema_override: bool | None = None,
+        inference_backend_override: str | None = None,
         voice_profile_id: int | None = None,
         route_mode: str = "reference",
     ) -> GenerationRequest:
@@ -1306,6 +1342,7 @@ def create_studio_app():
             seed=None if seed <= 0 else int(seed),
             checkpoint_path=checkpoint_override,
             use_ema=use_ema_override,
+            inference_backend=inference_backend_override,
         )
 
     def estimate_render(
@@ -1385,6 +1422,7 @@ def create_studio_app():
         status = (
             f"{mode.title()} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
+            f"Backend: {result.get('inference_backend_label', result.get('inference_backend', 'PyTorch F5-TTS'))}\n"
             f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
             f"Output length: {format_duration(result['duration_seconds'])}\n"
             f"Seed: {result.get('seed', 'random')}"
@@ -1419,7 +1457,7 @@ def create_studio_app():
         render_spectrogram: bool,
         seed: int,
     ) -> GenerationRequest:
-        checkpoint_override, use_ema_override = _deserialize_voice_model(model_choice)
+        checkpoint_override, use_ema_override, inference_backend_override = _deserialize_voice_model(model_choice)
         return build_request(
             project_id,
             reference_id,
@@ -1436,6 +1474,7 @@ def create_studio_app():
             seed,
             checkpoint_override=checkpoint_override,
             use_ema_override=use_ema_override,
+            inference_backend_override=inference_backend_override,
             voice_profile_id=voice_profile_id,
             route_mode=route_mode,
         )
@@ -1535,6 +1574,7 @@ def create_studio_app():
             f"Voice page {mode} render complete.\n"
             f"Take #{result['asset_id']} saved to the project library.\n"
             f"{profile_line}"
+            f"Backend: {result.get('inference_backend_label', result.get('inference_backend', 'PyTorch F5-TTS'))}\n"
             f"Generation time: {format_duration(result['elapsed_seconds'])}\n"
             f"Output length: {format_duration(result['duration_seconds'])}\n"
             f"Seed: {result.get('seed', 'random')}\n"
@@ -1706,7 +1746,7 @@ def create_studio_app():
         return detected, gr.update(choices=choices, value=detected), status, status
 
     def _trained_model_choice(checkpoint_path_value: str, use_ema_value: bool) -> str:
-        return _serialize_voice_model(checkpoint_path_value, use_ema_value)
+        return _serialize_voice_model(checkpoint_path_value, use_ema_value, backend="pytorch")
 
     def estimate_trained_render(
         project_id: int,
@@ -1787,12 +1827,14 @@ def create_studio_app():
     def save_settings(
         project_id: int,
         profile_name: str,
+        inference_backend_name: str,
         asr_backend: str,
         idle_unload_seconds: int,
         checkpoint_path_value: str,
         use_ema_value: bool,
     ):
         service.set_runtime_profile(profile_name)
+        service.set_inference_backend(inference_backend_name)
         service.set_asr_backend(asr_backend)
         service.set_idle_unload_seconds(idle_unload_seconds)
         service.set_checkpoint_path(checkpoint_path_value)
@@ -2456,6 +2498,15 @@ def create_studio_app():
                                 choices=[(profile.label, profile.name) for profile in PROFILE_MAP.values()],
                                 value=service.get_runtime_profile_name(),
                             )
+                            inference_backend = gr.Dropdown(
+                                label="Inference backend",
+                                choices=service.available_inference_backends(),
+                                value=service.get_inference_backend(),
+                            )
+                            gr.Markdown(
+                                "Apple MLX accelerates the shipped base model on Apple Silicon. Local finetuned checkpoints automatically stay on PyTorch.",
+                                elem_classes=["studio-muted-note"],
+                            )
                             asr_backend = gr.Dropdown(
                                 label="ASR backend",
                                 choices=[("Auto", "auto"), ("MLX Whisper", "mlx_whisper"), ("Transformers Whisper", "transformers")],
@@ -2886,7 +2937,7 @@ def create_studio_app():
 
             save_settings_btn.click(
                 save_settings,
-                inputs=[active_project, profile_choice, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
+                inputs=[active_project, profile_choice, inference_backend, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
                 outputs=refresh_outputs + [settings_status, trained_page_status],
             )
 

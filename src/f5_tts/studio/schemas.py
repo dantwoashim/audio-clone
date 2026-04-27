@@ -138,6 +138,7 @@ class GenerationRequest(BaseModel):
     render_spectrogram: bool | None = None
     checkpoint_path: str | None = None
     use_ema: bool | None = None
+    inference_backend: Literal["pytorch", "mlx"] | None = None
     seed: int | None = None
 
     @model_validator(mode="after")
@@ -193,6 +194,11 @@ class SystemProfileView(BaseModel):
     model_name: str
     checkpoint_path: str | None = None
     use_ema: bool = True
+    requested_inference_backend: str = "pytorch"
+    effective_inference_backend: str = "pytorch"
+    inference_backend_label: str = "PyTorch F5-TTS"
+    inference_backend_reason: str | None = None
+    mlx_available: bool = False
     engine_loaded: bool
     asr_backend: str
     asr_model: str

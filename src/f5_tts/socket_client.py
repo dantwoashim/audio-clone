@@ -58,6 +58,6 @@ async def listen_to_F5TTS(text, server_ip="localhost", server_port=9998):
 
 
 if __name__ == "__main__":
-    text_to_send = "As a Reader assistant, I'm familiar with new technology. which are key to its improved performance in terms of both training speed and inference efficiency. Let's break down the components"
+    text_to_send = "This is a streaming socket example. It sends a short passage to the speech server and starts playback as chunks arrive."
 
     asyncio.run(listen_to_F5TTS(text_to_send))

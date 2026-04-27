@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 
 
 DEFAULT_ASR_BACKEND = "auto"
+DEFAULT_INFERENCE_BACKEND = "mlx" if torch.backends.mps.is_available() else "pytorch"
+MLX_BACKEND_MODEL = "lucasnewman/f5-tts-mlx"
 
 CONTEXT_MODIFIERS = {
     "slow": {"speed": 0.9, "duration": 1.12},
@@ -204,6 +206,13 @@ def release_memory() -> None:
             torch.xpu.empty_cache()
     except Exception:
         pass
+    try:
+        import mlx.core as mx
+
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+    except Exception:
+        pass
 
 
 class StudioEngine:
@@ -212,9 +221,11 @@ class StudioEngine:
         self._lock = threading.Lock()
         self._engine: F5TTS | None = None
         self._engine_signature: tuple[str, str, bool] | None = None
+        self._mlx_engine = None
+        self._mlx_engine_signature: tuple[str, int | None] | None = None
         self._silero_model = None
         self._last_used_at = 0.0
-        self._timing_samples: list[float] = []
+        self._timing_samples: dict[str, list[float]] = {"pytorch": [], "mlx": []}
         self._reference_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
         self._reference_cache_limit = 8
 
@@ -230,13 +241,42 @@ class StudioEngine:
             return "mps"
         return "cpu"
 
+    def mlx_available(self) -> bool:
+        if not torch.backends.mps.is_available():
+            return False
+        try:
+            import f5_tts_mlx  # noqa: F401
+        except Exception:
+            return False
+        return True
+
     def _touch(self) -> None:
         self._last_used_at = time.time()
 
-    def is_loaded(self) -> bool:
-        return self._engine is not None
+    def is_loaded(self, backend: str | None = None) -> bool:
+        if backend == "mlx":
+            return self._mlx_engine is not None
+        if backend == "pytorch":
+            return self._engine is not None
+        return self._engine is not None or self._mlx_engine is not None
 
-    def ensure_engine(self, ckpt_file: str | None = None, use_ema: bool = True) -> F5TTS:
+    def ensure_engine(self, backend: str = "pytorch", ckpt_file: str | None = None, use_ema: bool = True):
+        if backend == "mlx":
+            if not self.mlx_available():
+                raise RuntimeError("The Apple MLX backend is not available on this machine.")
+            if ckpt_file:
+                raise RuntimeError("The Apple MLX backend currently supports only the shipped base model.")
+            signature = (MLX_BACKEND_MODEL, None)
+            if self._mlx_engine is None or self._mlx_engine_signature != signature:
+                with self._lock:
+                    if self._mlx_engine is None or self._mlx_engine_signature != signature:
+                        from f5_tts_mlx import F5TTS as MLXF5TTS
+
+                        self._mlx_engine = MLXF5TTS.from_pretrained(MLX_BACKEND_MODEL)
+                        self._mlx_engine_signature = signature
+            self._touch()
+            return self._mlx_engine
+
         signature = ("F5TTS_v1_Base", ckpt_file or "", bool(use_ema))
         if self._engine is None or self._engine_signature != signature:
             with self._lock:
@@ -272,18 +312,35 @@ class StudioEngine:
             self._reference_cache.move_to_end(cache_key)
         return self._reference_cache[cache_key]
 
-    def warm_up(self, ckpt_file: str | None = None, use_ema: bool = True) -> None:
-        self.ensure_engine(ckpt_file=ckpt_file, use_ema=use_ema).warm_up(show_info=lambda *_args, **_kwargs: None)
+    def warm_up(self, backend: str = "pytorch", ckpt_file: str | None = None, use_ema: bool = True) -> None:
+        if backend == "mlx":
+            prepared_reference = self.prepare_reference(
+                str(Path(__file__).resolve().parents[1] / "infer" / "examples" / "basic" / "basic_ref_en.wav"),
+                "Some call me nature, others call me mother nature.",
+            )
+            self._infer_with_mlx(
+                prepared_reference,
+                "Warm up the Apple MLX voice model.",
+                nfe_step=4,
+                speed=1.0,
+                cfg_strength=2.0,
+                sway_sampling_coef=-1.0,
+                seed=0,
+            )
+        else:
+            self.ensure_engine(backend=backend, ckpt_file=ckpt_file, use_ema=use_ema).warm_up(show_info=lambda *_args, **_kwargs: None)
         self._touch()
 
     def maybe_unload(self, idle_unload_seconds: int, force: bool = False) -> None:
-        if self._engine is None:
+        if self._engine is None and self._mlx_engine is None:
             return
         if not force and idle_unload_seconds > 0 and (time.time() - self._last_used_at) < idle_unload_seconds:
             return
         with self._lock:
             self._engine = None
             self._engine_signature = None
+            self._mlx_engine = None
+            self._mlx_engine_signature = None
         release_memory()
 
     def _load_silero(self):
@@ -503,7 +560,9 @@ class StudioEngine:
             notes=notes,
         )
 
-    def default_normalized_rtf(self) -> float:
+    def default_normalized_rtf(self, backend: str = "pytorch") -> float:
+        if backend == "mlx":
+            return 0.72 if self.mlx_available() else 1.15
         device = self.device
         if device.startswith("mps"):
             return 1.15
@@ -513,17 +572,19 @@ class StudioEngine:
             return 0.75
         return 2.4
 
-    def normalized_rtf(self) -> float:
-        if self._timing_samples:
-            return sum(self._timing_samples) / len(self._timing_samples)
-        return self.default_normalized_rtf()
+    def normalized_rtf(self, backend: str = "pytorch") -> float:
+        samples = self._timing_samples.get(backend, [])
+        if samples:
+            return sum(samples) / len(samples)
+        return self.default_normalized_rtf(backend=backend)
 
-    def _record_runtime(self, elapsed_seconds: float, runtime_seconds: float, nfe_step: int) -> None:
+    def _record_runtime(self, elapsed_seconds: float, runtime_seconds: float, nfe_step: int, backend: str = "pytorch") -> None:
         if runtime_seconds <= 0:
             return
         normalized = (elapsed_seconds / runtime_seconds) * (32 / max(nfe_step, 1))
-        self._timing_samples.append(normalized)
-        self._timing_samples[:] = self._timing_samples[-6:]
+        samples = self._timing_samples.setdefault(backend, [])
+        samples.append(normalized)
+        self._timing_samples[backend] = samples[-6:]
 
     def estimate_generation(
         self,
@@ -534,6 +595,7 @@ class StudioEngine:
         nfe_step: int,
         engine_loaded: bool,
         queue_depth: int,
+        backend: str = "pytorch",
     ) -> GenerationEstimate:
         prepared = self.prepare_reference(
             reference_audio_path,
@@ -556,10 +618,11 @@ class StudioEngine:
             frames = max(duration - ref_audio_len, 0)
             predicted_output_seconds += frames * hop_length / target_sample_rate
 
-        compute_seconds = predicted_output_seconds * self.normalized_rtf() * (nfe_step / 32)
+        compute_seconds = predicted_output_seconds * self.normalized_rtf(backend=backend) * (nfe_step / 32)
         cold_start_penalty = 0.0 if engine_loaded else 2.5
         total_seconds = compute_seconds + cold_start_penalty + max(len(text_batches) - 1, 0) * 0.12 + queue_depth * 0.4
-        confidence = "calibrated from recent local runs" if self._timing_samples else "first-run estimate"
+        samples = self._timing_samples.get(backend, [])
+        confidence = "calibrated from recent local runs" if samples else "first-run estimate"
         return GenerationEstimate(
             estimated_generation_seconds=total_seconds,
             predicted_output_seconds=predicted_output_seconds,
@@ -568,6 +631,89 @@ class StudioEngine:
             queue_depth=queue_depth,
             confidence=confidence,
         )
+
+    def _cross_fade_waves(self, generated_waves: list[np.ndarray], cross_fade_duration: float) -> np.ndarray:
+        if not generated_waves:
+            return np.array([], dtype=np.float32)
+        if len(generated_waves) == 1 or cross_fade_duration <= 0:
+            return np.concatenate(generated_waves)
+
+        final_wave = generated_waves[0]
+        for next_wave in generated_waves[1:]:
+            prev_wave = final_wave
+            cross_fade_samples = int(cross_fade_duration * target_sample_rate)
+            cross_fade_samples = min(cross_fade_samples, len(prev_wave), len(next_wave))
+            if cross_fade_samples <= 0:
+                final_wave = np.concatenate([prev_wave, next_wave])
+                continue
+
+            prev_overlap = prev_wave[-cross_fade_samples:]
+            next_overlap = next_wave[:cross_fade_samples]
+            fade_out = np.linspace(1, 0, cross_fade_samples, dtype=np.float32)
+            fade_in = np.linspace(0, 1, cross_fade_samples, dtype=np.float32)
+            cross_faded_overlap = prev_overlap * fade_out + next_overlap * fade_in
+            final_wave = np.concatenate(
+                [prev_wave[:-cross_fade_samples], cross_faded_overlap, next_wave[cross_fade_samples:]]
+            )
+        return final_wave.astype(np.float32, copy=False)
+
+    def _infer_with_mlx(
+        self,
+        prepared_reference: dict[str, Any],
+        gen_text: str,
+        *,
+        nfe_step: int,
+        speed: float,
+        cfg_strength: float,
+        sway_sampling_coef: float,
+        seed: int | None,
+        cross_fade_duration: float = 0.15,
+    ) -> tuple[np.ndarray, int, None]:
+        import mlx.core as mx
+        from f5_tts_mlx.utils import convert_char_to_pinyin
+
+        engine = self.ensure_engine(backend="mlx")
+
+        audio_tensor = prepared_reference["audio"].mean(dim=0).float()
+        sample_rate = int(prepared_reference["sample_rate"])
+        if sample_rate != target_sample_rate:
+            audio_tensor = torchaudio.functional.resample(audio_tensor.unsqueeze(0), sample_rate, target_sample_rate).squeeze(0)
+            sample_rate = target_sample_rate
+
+        ref_audio = audio_tensor.cpu().numpy().astype(np.float32, copy=False)
+        ref_text = prepared_reference["ref_text"].strip()
+        ref_audio_mx = mx.array(ref_audio)
+        rms = mx.sqrt(mx.mean(mx.square(ref_audio_mx)))
+        rms_value = float(rms.item())
+        if 0.0 < rms_value < 0.1:
+            ref_audio_mx = ref_audio_mx * (0.1 / rms)
+
+        batches = chunk_text(gen_text, max_chars=220) or [gen_text]
+        generated_waves: list[np.ndarray] = []
+        ref_audio_len = ref_audio_mx.shape[0] // hop_length
+        zh_pause_punc = r"。，、；：？！"
+        ref_text_len = len(ref_text.encode("utf-8")) + 3 * len(re.findall(zh_pause_punc, ref_text))
+        ref_text_len = max(ref_text_len, 1)
+        for chunk in batches:
+            text = convert_char_to_pinyin([f"{ref_text} {chunk}".strip()])
+            chunk_text_len = len(chunk.encode("utf-8")) + 3 * len(re.findall(zh_pause_punc, chunk))
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * max(chunk_text_len, 1) / max(speed, 0.1))
+            wave, _trajectory = engine.sample(
+                mx.expand_dims(ref_audio_mx, axis=0),
+                text=text,
+                duration=duration,
+                steps=max(int(nfe_step), 1),
+                method="rk4",
+                cfg_strength=cfg_strength,
+                speed=speed,
+                sway_sampling_coef=sway_sampling_coef,
+                seed=seed,
+            )
+            wave = wave[ref_audio_mx.shape[0] :]
+            mx.eval(wave)
+            generated_waves.append(np.array(wave, dtype=np.float32))
+
+        return self._cross_fade_waves(generated_waves, cross_fade_duration), sample_rate, None
 
     def _resolve_render_targets(
         self,
@@ -628,10 +774,10 @@ class StudioEngine:
         style: dict | None,
         pronunciation_rules: list[dict],
         output_dir: Path,
+        backend: str = "pytorch",
         ckpt_file: str | None = None,
         use_ema: bool = True,
     ) -> dict:
-        engine = self.ensure_engine(ckpt_file=ckpt_file, use_ema=use_ema)
         prepared = self.prepare_reference(
             reference["audio_path"],
             reference["transcript"],
@@ -652,19 +798,34 @@ class StudioEngine:
         spec_path = output_dir / f"{timestamp}-{filename_stem}-{request.mode}.png"
 
         started_at = time.perf_counter()
-        wav, sample_rate, spec = engine.infer_prepared(
-            prepared,
-            gen_text=render_text,
-            speed=speed,
-            nfe_step=nfe_step,
-            cross_fade_duration=request.cross_fade_duration,
-            cfg_strength=request.cfg_strength,
-            sway_sampling_coef=request.sway_sampling_coef,
-            progress=None,
-            remove_silence=False,
-            fix_duration=fix_duration,
-            seed=request.seed,
-        )
+        if backend == "mlx":
+            wav, sample_rate, spec = self._infer_with_mlx(
+                prepared,
+                render_text,
+                nfe_step=nfe_step,
+                speed=speed,
+                cfg_strength=request.cfg_strength,
+                sway_sampling_coef=request.sway_sampling_coef,
+                seed=request.seed,
+                cross_fade_duration=request.cross_fade_duration,
+            )
+            resolved_seed = request.seed
+        else:
+            engine = self.ensure_engine(backend=backend, ckpt_file=ckpt_file, use_ema=use_ema)
+            wav, sample_rate, spec = engine.infer_prepared(
+                prepared,
+                gen_text=render_text,
+                speed=speed,
+                nfe_step=nfe_step,
+                cross_fade_duration=request.cross_fade_duration,
+                cfg_strength=request.cfg_strength,
+                sway_sampling_coef=request.sway_sampling_coef,
+                progress=None,
+                remove_silence=False,
+                fix_duration=fix_duration,
+                seed=request.seed,
+            )
+            resolved_seed = getattr(engine, "seed", request.seed)
         elapsed_seconds = time.perf_counter() - started_at
 
         sf.write(wav_path, wav, sample_rate)
@@ -682,7 +843,7 @@ class StudioEngine:
             spec_path = None
 
         runtime_seconds = len(wav) / sample_rate if len(wav) else 0.0
-        self._record_runtime(elapsed_seconds, runtime_seconds, nfe_step)
+        self._record_runtime(elapsed_seconds, runtime_seconds, nfe_step, backend=backend)
         self._touch()
         return {
             "audio_path": str(wav_path),
@@ -693,7 +854,9 @@ class StudioEngine:
             "text_excerpt": render_text[:240],
             "effective_speed": speed,
             "nfe_step": nfe_step,
-            "seed": getattr(engine, "seed", request.seed),
+            "seed": resolved_seed,
+            "inference_backend": backend,
+            "inference_backend_label": "Apple MLX F5-TTS" if backend == "mlx" else "PyTorch F5-TTS",
             "style_notes": style_notes,
         }
 
@@ -838,8 +1001,37 @@ class StudioService:
         self.store.set_setting("use_ema", "true" if value else "false")
         self.engine.maybe_unload(0, force=True)
 
+    def get_inference_backend(self) -> str:
+        saved = (self.store.get_setting("inference_backend", DEFAULT_INFERENCE_BACKEND) or DEFAULT_INFERENCE_BACKEND).strip()
+        if saved == "mlx" and not self.engine.mlx_available():
+            return "pytorch"
+        return saved if saved in {"pytorch", "mlx"} else "pytorch"
+
+    def set_inference_backend(self, backend: str) -> str:
+        normalized = "mlx" if backend == "mlx" and self.engine.mlx_available() else "pytorch"
+        self.store.set_setting("inference_backend", normalized)
+        self.engine.maybe_unload(0, force=True)
+        return normalized
+
+    def available_inference_backends(self) -> list[tuple[str, str]]:
+        choices = [("PyTorch F5-TTS", "pytorch")]
+        if self.engine.mlx_available():
+            choices.insert(0, ("Apple MLX F5-TTS", "mlx"))
+        return choices
+
+    def _backend_label(self, backend: str) -> str:
+        return "Apple MLX F5-TTS" if backend == "mlx" else "PyTorch F5-TTS"
+
     def _engine_options(self) -> dict[str, Any]:
         return self._engine_options_for_request()
+
+    @staticmethod
+    def _render_engine_options_from(options: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "backend": options["backend"],
+            "ckpt_file": options["ckpt_file"],
+            "use_ema": options["use_ema"],
+        }
 
     def _engine_options_for_request(self, request: GenerationRequest | None = None) -> dict[str, Any]:
         if request is None or request.checkpoint_path is None:
@@ -859,7 +1051,23 @@ class StudioService:
         else:
             use_ema = bool(request.use_ema)
 
+        requested_backend = self.get_inference_backend()
+        if request is not None and request.inference_backend is not None:
+            requested_backend = request.inference_backend
+
+        backend = requested_backend
+        backend_reason = None
+        if backend == "mlx" and checkpoint_path:
+            backend = "pytorch"
+            backend_reason = "Apple MLX currently supports only the shipped base model, so checkpoint renders stay on PyTorch."
+        elif backend == "mlx" and not self.engine.mlx_available():
+            backend = "pytorch"
+            backend_reason = "Apple MLX is not available in this environment, so renders stay on PyTorch."
+
         return {
+            "backend": backend,
+            "requested_backend": requested_backend,
+            "backend_reason": backend_reason,
             "ckpt_file": checkpoint_path,
             "use_ema": use_ema,
         }
@@ -902,7 +1110,8 @@ class StudioService:
         profile = get_runtime_profile(self.get_runtime_profile_name())
         if not profile.warm_on_start:
             return "Warm-up skipped in the current runtime profile."
-        if self.engine.is_loaded():
+        options = self._engine_options()
+        if self.engine.is_loaded(options["backend"]):
             return "Voice engine is already warm."
         if self._warm_thread and self._warm_thread.is_alive():
             return "Voice engine warm-up is already in progress."
@@ -910,19 +1119,34 @@ class StudioService:
         def worker():
             try:
                 self._last_warm_error = None
-                self.engine.warm_up(**self._engine_options())
+                self.engine.warm_up(
+                    backend=options["backend"],
+                    ckpt_file=options["ckpt_file"],
+                    use_ema=options["use_ema"],
+                )
             except Exception as exc:
                 self._last_warm_error = str(exc)
 
         self._warm_thread = threading.Thread(target=worker, daemon=True)
         self._warm_thread.start()
-        return "Voice engine warm-up started in the background."
+        note = f"Voice engine warm-up started in the background using {self._backend_label(options['backend'])}."
+        if options.get("backend_reason"):
+            note += f" {options['backend_reason']}"
+        return note
 
     def warm_engine_now(self) -> str:
         try:
             self._last_warm_error = None
-            self.engine.warm_up(**self._engine_options())
-            return "Voice engine is warm and ready."
+            options = self._engine_options()
+            self.engine.warm_up(
+                backend=options["backend"],
+                ckpt_file=options["ckpt_file"],
+                use_ema=options["use_ema"],
+            )
+            note = f"Voice engine is warm and ready using {self._backend_label(options['backend'])}."
+            if options.get("backend_reason"):
+                note += f" {options['backend_reason']}"
+            return note
         except Exception as exc:
             self._last_warm_error = str(exc)
             raise
@@ -1378,6 +1602,7 @@ class StudioService:
         resolved = self._resolve_generation_route(request)
         reference = resolved["reference"]
         style = resolved["style"]
+        engine_options = self._engine_options_for_request(request)
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
         normalized_text = normalize_script(request.text, pronunciation_rules)
         speed = request.speed if request.speed is not None else 1.0
@@ -1395,8 +1620,9 @@ class StudioService:
             text=normalized_text,
             speed=speed,
             nfe_step=nfe_step,
-            engine_loaded=self.engine.is_loaded(),
+            engine_loaded=self.engine.is_loaded(engine_options["backend"]),
             queue_depth=self._job_queue.qsize(),
+            backend=engine_options["backend"],
         )
         self.maybe_unload_idle_engine()
         return estimate.model_dump()
@@ -1446,13 +1672,14 @@ class StudioService:
         reference = resolved["reference"]
         style = resolved["style"]
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
+        engine_options = self._engine_options_for_request(request)
         result = self.engine.render(
             request,
             reference,
             style,
             pronunciation_rules,
             output_dir=self._job_output_dir(project),
-            **self._engine_options_for_request(request),
+            **self._render_engine_options_from(engine_options),
         )
         return self._finalize_completed_job(job_id, request, result, resolved)
 
@@ -1463,6 +1690,7 @@ class StudioService:
         reference = resolved["reference"]
         style = resolved["style"]
         pronunciation_rules = self.store.list_pronunciation_rules(request.project_id)
+        engine_options = self._engine_options_for_request(request)
         result_queue: mp.Queue = self._process_context.Queue()
         process = self._process_context.Process(
             target=_render_job_process,
@@ -1473,7 +1701,7 @@ class StudioService:
                 style,
                 pronunciation_rules,
                 str(self._job_output_dir(project)),
-                self._engine_options_for_request(request),
+                self._render_engine_options_from(engine_options),
                 result_queue,
             ),
             daemon=True,
@@ -1627,14 +1855,17 @@ class StudioService:
         profile = get_runtime_profile(profile_name)
         checkpoint_path = self.get_checkpoint_path()
         security = get_security_settings()
+        engine_options = self._engine_options()
+        effective_backend = engine_options["backend"]
+        requested_backend = engine_options["requested_backend"]
         return SystemProfileView(
             profile=profile_name,
             profile_label=profile.label,
             description=profile.description,
-            engine_loaded=self.engine.is_loaded(),
+            engine_loaded=self.engine.is_loaded(effective_backend),
             asr_backend=self._effective_asr_backend(),
             asr_model=self.get_asr_model_name(),
-            device=self.engine.device,
+            device="apple-mlx" if effective_backend == "mlx" else self.engine.device,
             queue_depth=self._job_queue.qsize(),
             worker_alive=bool(self._worker and self._worker.is_alive()),
             current_job_id=self._current_job_id,
@@ -1644,6 +1875,11 @@ class StudioService:
             model_name="F5TTS_v1_Base",
             checkpoint_path=checkpoint_path or None,
             use_ema=self.get_use_ema(),
+            requested_inference_backend=requested_backend,
+            effective_inference_backend=effective_backend,
+            inference_backend_label=self._backend_label(effective_backend),
+            inference_backend_reason=engine_options.get("backend_reason"),
+            mlx_available=self.engine.mlx_available(),
             last_warm_error=self._last_warm_error,
             auth_mode=security.auth_mode,
             auth_enabled=security.auth_enabled,

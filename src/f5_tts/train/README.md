@@ -72,8 +72,8 @@ By default, the training script does NOT use logging (assuming you didn't manual
 
 To turn on wandb logging, you can either:
 
-1. Manually login with `wandb login`: Learn more [here](https://docs.wandb.ai/ref/cli/wandb-login)
-2. Automatically login programmatically by setting an environment variable: Get an API KEY at https://wandb.ai/authorize and set the environment variable as follows:
+1. Manually login with `wandb login`
+2. Automatically login programmatically by setting an environment variable and exporting your W&B API key as follows:
 
 On Mac & Linux:
 

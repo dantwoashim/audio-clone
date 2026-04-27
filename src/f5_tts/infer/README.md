@@ -23,7 +23,7 @@ Currently supported features:
 
 - Basic TTS with Chunk Inference
 - Multi-Style / Multi-Speaker Generation
-- Voice Chat powered by Qwen2.5-3B-Instruct
+- Voice Chat
 - Voice Studio Pro, a local-first voice-cloning studio with projects, reusable references and style prompts, A/B take comparison, pronunciation rules, batch jobs, and export bundles
 - [Custom inference with more language support](SHARED.md)
 
@@ -63,7 +63,12 @@ The upgraded studio keeps the core cloning flow obvious while adding a real proj
 
 It is a good fit when you want to hand the app to non-technical users and avoid the denser demo layout.
 
-The Settings tab can also switch the studio over to a local finetune checkpoint, for example `ckpts/your_project/model_last.pt`. If you are testing a very early checkpoint, try turning off `Use EMA weights` before comparing it to the base model.
+The Settings tab can also switch the studio over to:
+
+- a local finetune checkpoint, for example `ckpts/your_project/model_last.pt`
+- the Apple MLX inference backend for the shipped base model on Apple Silicon
+
+If you are testing a very early checkpoint, try turning off `Use EMA weights` before comparing it to the base model. If you choose the Apple MLX backend while a local finetune checkpoint is active, the studio will automatically keep that render on PyTorch because the MLX path currently targets the shipped base model only.
 
 There is also an API/server mode:
 
