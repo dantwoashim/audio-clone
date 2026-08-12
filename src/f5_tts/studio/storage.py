@@ -351,7 +351,9 @@ class StudioStore:
 
         with self._connect() as conn:
             if is_default:
-                conn.execute("UPDATE voice_profiles SET is_default = 0, updated_at = ? WHERE project_id = ?", (now, project_id))
+                conn.execute(
+                    "UPDATE voice_profiles SET is_default = 0, updated_at = ? WHERE project_id = ?", (now, project_id)
+                )
 
             if profile_id is None:
                 cursor = conn.execute(
@@ -454,13 +456,18 @@ class StudioStore:
         profile["member_count"] = len(members)
         return profile
 
-    def sync_default_voice_profile(self, project_id: int, profile_name: str = "Auto profile · all references") -> dict | None:
+    def sync_default_voice_profile(
+        self, project_id: int, profile_name: str = "Auto profile · all references"
+    ) -> dict | None:
         references = self.list_voice_assets(project_id, "reference")
         if not references:
             return None
 
         reference_ids = [int(reference["id"]) for reference in references]
-        existing_default = next((profile for profile in self.list_voice_profiles(project_id) if int(profile.get("is_default", 0)) == 1), None)
+        existing_default = next(
+            (profile for profile in self.list_voice_profiles(project_id) if int(profile.get("is_default", 0)) == 1),
+            None,
+        )
         description = "System-managed profile that keeps every saved reference from this project available for automatic selection."
         if existing_default is None:
             return self.save_voice_profile(

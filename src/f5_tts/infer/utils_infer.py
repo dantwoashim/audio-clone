@@ -2,8 +2,8 @@
 # Make adjustments inside functions, and consider both gradio and cli scripts if need to change func output format
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
@@ -187,9 +187,7 @@ def initialize_asr_pipeline(device: str = device, dtype=None, model_name: str | 
     global asr_pipe
     global asr_pipe_model
     model_name = model_name or (
-        "openai/whisper-small"
-        if str(device).startswith("mps")
-        else "openai/whisper-large-v3-turbo"
+        "openai/whisper-small" if str(device).startswith("mps") else "openai/whisper-large-v3-turbo"
     )
     if asr_pipe is not None and asr_pipe_model == model_name:
         return asr_pipe

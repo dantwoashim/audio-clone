@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
+
 TOKEN_PATTERN = re.compile(r"[\u3400-\u9FFF]|[A-Za-z0-9']+|[^\s]", re.UNICODE)
 
 
@@ -73,7 +74,9 @@ def align_transcript(
         asr_words = []
         confirmed_text = transcript.strip()
         if not confirmed_text:
-            raise ImportError("mlx-whisper is required to auto-align a transcript when no manual transcript is provided.")
+            raise ImportError(
+                "mlx-whisper is required to auto-align a transcript when no manual transcript is provided."
+            )
     transcript_tokens = tokenize_transcript(confirmed_text)
     if not transcript_tokens:
         raise ValueError("Transcript is empty after tokenization.")
@@ -139,9 +142,15 @@ def align_transcript(
             end = asr_words[matched_idx]["end"]
             confidence = 1.0
         else:
-            prev_match = next((matched_positions[i] for i in range(index - 1, -1, -1) if matched_positions[i] is not None), None)
+            prev_match = next(
+                (matched_positions[i] for i in range(index - 1, -1, -1) if matched_positions[i] is not None), None
+            )
             next_match = next(
-                (matched_positions[i] for i in range(index + 1, len(matched_positions)) if matched_positions[i] is not None),
+                (
+                    matched_positions[i]
+                    for i in range(index + 1, len(matched_positions))
+                    if matched_positions[i] is not None
+                ),
                 None,
             )
             if prev_match is not None and next_match is not None:
@@ -257,11 +266,7 @@ def build_text_edit_plan(
         original_text = ""
     else:
         edited_text = insert_with_spacing(transcript[:char_end], replacement_value, transcript[char_end:])
-        next_start = (
-            float(aligned_words[end_idx + 1]["start"])
-            if end_idx + 1 < len(aligned_words)
-            else span_end + 0.12
-        )
+        next_start = float(aligned_words[end_idx + 1]["start"]) if end_idx + 1 < len(aligned_words) else span_end + 0.12
         original_duration = max(next_start - span_end, 0.12)
         span_start = span_end
         original_text = ""

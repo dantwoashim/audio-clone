@@ -8,7 +8,6 @@ import os
 import queue
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -25,9 +24,16 @@ import torchaudio
 from f5_tts.studio.diagnostics import diagnose_render, reference_quality_breakdown
 from f5_tts.studio.paths import StudioPaths, get_studio_paths
 from f5_tts.studio.profiles import DEFAULT_PROFILE, PROFILE_MAP, get_runtime_profile
-from f5_tts.studio.schemas import GenerationEstimate, GenerationRequest, ReferenceAnalysis, StyleAnalysis, SystemProfileView
+from f5_tts.studio.schemas import (
+    GenerationEstimate,
+    GenerationRequest,
+    ReferenceAnalysis,
+    StyleAnalysis,
+    SystemProfileView,
+)
 from f5_tts.studio.security import ensure_upload_within_limit, get_security_settings
 from f5_tts.studio.storage import StudioStore
+
 
 if TYPE_CHECKING:
     from f5_tts.api import F5TTS
@@ -168,7 +174,9 @@ def normalize_script(text: str, pronunciation_rules: list[dict]) -> str:
     return text
 
 
-def apply_context_modifiers(base_speed: float, base_duration: float | None, context_notes: str) -> tuple[float, float | None, list[str]]:
+def apply_context_modifiers(
+    base_speed: float, base_duration: float | None, context_notes: str
+) -> tuple[float, float | None, list[str]]:
     if not context_notes.strip():
         return base_speed, base_duration, []
 
@@ -328,7 +336,9 @@ class StudioEngine:
                 seed=0,
             )
         else:
-            self.ensure_engine(backend=backend, ckpt_file=ckpt_file, use_ema=use_ema).warm_up(show_info=lambda *_args, **_kwargs: None)
+            self.ensure_engine(backend=backend, ckpt_file=ckpt_file, use_ema=use_ema).warm_up(
+                show_info=lambda *_args, **_kwargs: None
+            )
         self._touch()
 
     def maybe_unload(self, idle_unload_seconds: int, force: bool = False) -> None:
@@ -353,7 +363,9 @@ class StudioEngine:
         self._silero_model = load_silero_vad()
         return self._silero_model
 
-    def _speech_metrics(self, audio_path: str, mono_audio: torch.Tensor, sample_rate: int) -> tuple[float | None, float | None]:
+    def _speech_metrics(
+        self, audio_path: str, mono_audio: torch.Tensor, sample_rate: int
+    ) -> tuple[float | None, float | None]:
         model = self._load_silero()
         if model is None:
             return None, None
@@ -403,7 +415,9 @@ class StudioEngine:
             except Exception:
                 chosen_backend = "transformers"
 
-        from f5_tts.infer.utils_infer import transcribe as infer_transcribe, unload_asr_pipeline
+        from f5_tts.infer.utils_infer import transcribe as infer_transcribe
+        from f5_tts.infer.utils_infer import unload_asr_pipeline
+
         transformers_model = model_name
         if not transformers_model or transformers_model.startswith("mlx-community/"):
             if transformers_model and "small" in transformers_model:
@@ -437,7 +451,11 @@ class StudioEngine:
         peak = float(mono_audio.abs().max().item()) if mono_audio.numel() else 0.0
 
         window = max(sample_rate // 20, 1)
-        unfolded = mono_audio.abs().unfold(0, window, window) if mono_audio.shape[-1] >= window else mono_audio.abs().unsqueeze(0)
+        unfolded = (
+            mono_audio.abs().unfold(0, window, window)
+            if mono_audio.shape[-1] >= window
+            else mono_audio.abs().unsqueeze(0)
+        )
         energies = unfolded.mean(dim=-1)
         silence_threshold = max(rms * 0.35, 0.01)
         trailing_silence_seconds = 0.0
@@ -467,7 +485,9 @@ class StudioEngine:
         elif duration_seconds < 6:
             warnings.append("Reference is usable, but 6 to 12 seconds usually gives more reliable identity.")
         if duration_seconds > 14:
-            warnings.append("Reference is longer than 14 seconds. Trim closer to 12 seconds for faster and safer inference.")
+            warnings.append(
+                "Reference is longer than 14 seconds. Trim closer to 12 seconds for faster and safer inference."
+            )
         if peak > 0.98:
             warnings.append("Reference may be clipping. A cleaner take should improve naturalness.")
         if rms < 0.015:
@@ -578,7 +598,9 @@ class StudioEngine:
             return sum(samples) / len(samples)
         return self.default_normalized_rtf(backend=backend)
 
-    def _record_runtime(self, elapsed_seconds: float, runtime_seconds: float, nfe_step: int, backend: str = "pytorch") -> None:
+    def _record_runtime(
+        self, elapsed_seconds: float, runtime_seconds: float, nfe_step: int, backend: str = "pytorch"
+    ) -> None:
         if runtime_seconds <= 0:
             return
         normalized = (elapsed_seconds / runtime_seconds) * (32 / max(nfe_step, 1))
@@ -677,7 +699,9 @@ class StudioEngine:
         audio_tensor = prepared_reference["audio"].mean(dim=0).float()
         sample_rate = int(prepared_reference["sample_rate"])
         if sample_rate != target_sample_rate:
-            audio_tensor = torchaudio.functional.resample(audio_tensor.unsqueeze(0), sample_rate, target_sample_rate).squeeze(0)
+            audio_tensor = torchaudio.functional.resample(
+                audio_tensor.unsqueeze(0), sample_rate, target_sample_rate
+            ).squeeze(0)
             sample_rate = target_sample_rate
 
         ref_audio = audio_tensor.cpu().numpy().astype(np.float32, copy=False)
@@ -783,12 +807,14 @@ class StudioEngine:
             reference["transcript"],
         )
         profile_name = self.store.get_setting("runtime_profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
-        render_text, speed, fix_duration, nfe_step, remove_silence, render_spectrogram, style_notes = self._resolve_render_targets(
-            request,
-            reference,
-            style,
-            pronunciation_rules,
-            profile_name,
+        render_text, speed, fix_duration, nfe_step, remove_silence, render_spectrogram, style_notes = (
+            self._resolve_render_targets(
+                request,
+                reference,
+                style,
+                pronunciation_rules,
+                profile_name,
+            )
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1002,7 +1028,9 @@ class StudioService:
         self.engine.maybe_unload(0, force=True)
 
     def get_inference_backend(self) -> str:
-        saved = (self.store.get_setting("inference_backend", DEFAULT_INFERENCE_BACKEND) or DEFAULT_INFERENCE_BACKEND).strip()
+        saved = (
+            self.store.get_setting("inference_backend", DEFAULT_INFERENCE_BACKEND) or DEFAULT_INFERENCE_BACKEND
+        ).strip()
         if saved == "mlx" and not self.engine.mlx_available():
             return "pytorch"
         return saved if saved in {"pytorch", "mlx"} else "pytorch"
@@ -1059,7 +1087,9 @@ class StudioService:
         backend_reason = None
         if backend == "mlx" and checkpoint_path:
             backend = "pytorch"
-            backend_reason = "Apple MLX currently supports only the shipped base model, so checkpoint renders stay on PyTorch."
+            backend_reason = (
+                "Apple MLX currently supports only the shipped base model, so checkpoint renders stay on PyTorch."
+            )
         elif backend == "mlx" and not self.engine.mlx_available():
             backend = "pytorch"
             backend_reason = "Apple MLX is not available in this environment, so renders stay on PyTorch."
@@ -1405,10 +1435,7 @@ class StudioService:
         expected = expected_text.strip()
         if not expected:
             expected = (
-                metadata.get("requested_text")
-                or metadata.get("edited_text")
-                or metadata.get("text_excerpt")
-                or ""
+                metadata.get("requested_text") or metadata.get("edited_text") or metadata.get("text_excerpt") or ""
             )
         if not expected and asset.get("job_id"):
             try:
@@ -1632,7 +1659,9 @@ class StudioService:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
-    def _finalize_completed_job(self, job_id: int, request: GenerationRequest, result: dict, resolved: dict[str, Any]) -> dict:
+    def _finalize_completed_job(
+        self, job_id: int, request: GenerationRequest, result: dict, resolved: dict[str, Any]
+    ) -> dict:
         reference = resolved["reference"]
         voice_profile = resolved.get("voice_profile")
         selection = dict(resolved.get("reference_selection") or {})
@@ -1666,7 +1695,7 @@ class StudioService:
         return self.store.get_job(job_id)
 
     def _execute_job(self, job_id: int, request: GenerationRequest) -> dict:
-        job = self.store.update_job(job_id, status="running")
+        self.store.update_job(job_id, status="running")
         project = self.store.get_project_summary(request.project_id)
         resolved = self._resolve_generation_route(request)
         reference = resolved["reference"]
@@ -1811,14 +1840,20 @@ class StudioService:
         audio_target = bundle_dir / audio_source.name
         shutil.copy2(audio_source, audio_target)
 
-        spec_source = Path(asset["metadata"].get("spectrogram_path", "")) if asset["metadata"].get("spectrogram_path") else None
+        spec_source = (
+            Path(asset["metadata"].get("spectrogram_path", "")) if asset["metadata"].get("spectrogram_path") else None
+        )
         spec_target = None
         if spec_source and spec_source.exists():
             spec_target = bundle_dir / spec_source.name
             shutil.copy2(spec_source, spec_target)
 
         metadata_pretty = html.escape(json.dumps(asset["metadata"], indent=2, ensure_ascii=True))
-        image_block = f'<img src="{spec_target.name}" alt="Spectrogram" style="max-width: 100%; border-radius: 14px;" />' if spec_target else ""
+        image_block = (
+            f'<img src="{spec_target.name}" alt="Spectrogram" style="max-width: 100%; border-radius: 14px;" />'
+            if spec_target
+            else ""
+        )
         index_path = bundle_dir / "index.html"
         index_path.write_text(
             f"""<!doctype html>
@@ -1826,7 +1861,7 @@ class StudioService:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(asset['label'])}</title>
+  <title>{html.escape(asset["label"])}</title>
   <style>
     body {{ font-family: ui-sans-serif, system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 32px; background: #f4efe6; color: #182018; }}
     main {{ background: rgba(255,255,255,0.82); border: 1px solid rgba(24,32,24,0.1); border-radius: 24px; padding: 24px; }}
@@ -1836,8 +1871,8 @@ class StudioService:
 </head>
 <body>
   <main>
-    <h1>{html.escape(asset['label'])}</h1>
-    <p>Project: {html.escape(project['name'])}</p>
+    <h1>{html.escape(asset["label"])}</h1>
+    <p>Project: {html.escape(project["name"])}</p>
     <audio controls src="{audio_target.name}"></audio>
     {image_block}
     <h2>Metadata</h2>

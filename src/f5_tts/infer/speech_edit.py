@@ -16,9 +16,15 @@ from f5_tts.studio.editing import align_transcript, build_text_edit_plan, render
 @click.option("--output_dir", default="tests", type=click.Path(file_okay=False, dir_okay=True))
 @click.option("--checkpoint", "checkpoint_path", default="", help="Optional finetuned checkpoint to use for the edit.")
 @click.option("--use_ema/--no_use_ema", default=True, help="Use EMA weights when loading the checkpoint.")
-@click.option("--preserve_timing/--free_timing", default=True, help="Keep the original phrase timing or allow it to expand.")
+@click.option(
+    "--preserve_timing/--free_timing", default=True, help="Keep the original phrase timing or allow it to expand."
+)
 @click.option("--nfe_step", default=32, type=int, help="Number of denoising steps.")
-@click.option("--render_spectrogram/--no_render_spectrogram", default=True, help="Render a spectrogram alongside the edited audio.")
+@click.option(
+    "--render_spectrogram/--no_render_spectrogram",
+    default=True,
+    help="Render a spectrogram alongside the edited audio.",
+)
 def main(
     audio_path: str,
     transcript: str,
@@ -61,7 +67,7 @@ def main(
     )
 
     click.echo(f"Transcript: {alignment['transcript']}")
-    click.echo(f'Edited phrase: {plan["target_text"]} -> {plan["replacement_text"]}')
+    click.echo(f"Edited phrase: {plan['target_text']} -> {plan['replacement_text']}")
     click.echo(f"Audio written to: {result['audio_path']}")
     if result.get("spectrogram_path"):
         click.echo(f"Spectrogram written to: {result['spectrogram_path']}")

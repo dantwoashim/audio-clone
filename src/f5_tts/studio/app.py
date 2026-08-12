@@ -30,6 +30,7 @@ def studio_allowed_paths(service=None) -> list[str]:
         allowed.add(str(voice_output_root))
     return sorted(allowed)
 
+
 APP_CSS = """
 :root {
   --studio-bg: #efe3cf;
@@ -543,7 +544,9 @@ def _first_nonzero_value(choices: list[tuple[str, int]]) -> int | None:
     return None
 
 
-def _voice_profile_choice_pairs(items: list[dict], include_none: bool = False, include_new: bool = False) -> list[tuple[str, int]]:
+def _voice_profile_choice_pairs(
+    items: list[dict], include_none: bool = False, include_new: bool = False
+) -> list[tuple[str, int]]:
     choices: list[tuple[str, int]] = []
     if include_none:
         choices.append(("No voice profile", 0))
@@ -597,7 +600,9 @@ def _page_intro_html(kicker: str, title: str, body: str) -> str:
 
 
 def _project_overview_html(project: dict, system_profile: dict) -> str:
-    description = project.get("description") or "No project description yet. Add one when this becomes a real delivery lane."
+    description = (
+        project.get("description") or "No project description yet. Add one when this becomes a real delivery lane."
+    )
     checkpoint_label = _current_voice_label(system_profile)
     backend_label = system_profile.get("inference_backend_label") or "PyTorch F5-TTS"
     stats = [
@@ -619,7 +624,7 @@ def _project_overview_html(project: dict, system_profile: dict) -> str:
     <section class="studio-overview">
       <div class="studio-overview-copy">
         <p class="studio-eyebrow">Project cockpit</p>
-        <h2>{html.escape(project['name'])}</h2>
+        <h2>{html.escape(project["name"])}</h2>
         <p>{html.escape(description)}</p>
       </div>
       <div class="studio-stat-grid">{stat_html}</div>
@@ -634,11 +639,11 @@ def _project_overview_html(project: dict, system_profile: dict) -> str:
         </div>
         <div class="studio-mini">
           <strong>Device</strong>
-          <span>{html.escape(str(system_profile.get('device', 'unknown')).upper())}</span>
+          <span>{html.escape(str(system_profile.get("device", "unknown")).upper())}</span>
         </div>
         <div class="studio-mini">
           <strong>Runtime profile</strong>
-          <span>{html.escape(system_profile.get('profile_label', 'Balanced'))}</span>
+          <span>{html.escape(system_profile.get("profile_label", "Balanced"))}</span>
         </div>
       </div>
     </section>
@@ -652,13 +657,9 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
     asr_model = system_profile.get("asr_model") or "auto"
     backend_label = system_profile.get("inference_backend_label") or "PyTorch F5-TTS"
     backend_reason = system_profile.get("inference_backend_reason")
-    backend_note = (
-        f"{backend_label}. {backend_reason}"
-        if backend_reason
-        else backend_label
-    )
+    backend_note = f"{backend_label}. {backend_reason}" if backend_reason else backend_label
     warm_note = (
-        f"<div class=\"studio-mini\"><strong>Warm-up</strong><span>{html.escape(system_profile['last_warm_error'])}</span></div>"
+        f'<div class="studio-mini"><strong>Warm-up</strong><span>{html.escape(system_profile["last_warm_error"])}</span></div>'
         if system_profile.get("last_warm_error")
         else ""
     )
@@ -673,11 +674,11 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
       <div class="studio-mini-grid">
         <div class="studio-mini">
           <strong>Device</strong>
-          <span>{html.escape(str(system_profile.get('device', 'unknown')).upper())}</span>
+          <span>{html.escape(str(system_profile.get("device", "unknown")).upper())}</span>
         </div>
         <div class="studio-mini">
           <strong>Queue</strong>
-          <span>{html.escape(str(system_profile.get('queue_depth', 0)))} waiting</span>
+          <span>{html.escape(str(system_profile.get("queue_depth", 0)))} waiting</span>
         </div>
         <div class="studio-mini">
           <strong>Engine</strong>
@@ -700,13 +701,13 @@ def _runtime_snapshot_html(system_profile: dict) -> str:
 def _sharing_snapshot_html(system_profile: dict) -> str:
     warning = system_profile.get("sharing_warning")
     warning_html = (
-        f"<p class=\"studio-warning\">{html.escape(warning)}</p>"
+        f'<p class="studio-warning">{html.escape(warning)}</p>'
         if warning
-        else "<p class=\"studio-ok\">Local-only mode. Nothing is exposed beyond this machine right now.</p>"
+        else '<p class="studio-ok">Local-only mode. Nothing is exposed beyond this machine right now.</p>'
     )
     public_url = system_profile.get("public_url")
     public_url_html = (
-        f"<div class=\"studio-mini\"><strong>Public URL</strong><span>{html.escape(public_url)}</span></div>"
+        f'<div class="studio-mini"><strong>Public URL</strong><span>{html.escape(public_url)}</span></div>'
         if public_url
         else ""
     )
@@ -714,25 +715,25 @@ def _sharing_snapshot_html(system_profile: dict) -> str:
     <section class="studio-trained-overview">
       <div class="studio-trained-copy">
         <p class="studio-eyebrow">Sharing safety</p>
-        <h2>{'Protected share' if system_profile.get('auth_enabled') else 'Local by default'}</h2>
+        <h2>{"Protected share" if system_profile.get("auth_enabled") else "Local by default"}</h2>
         <p>
-          Upload limit: {html.escape(str(system_profile.get('upload_limit_mb', 64)))} MB.
-          Auth mode: {html.escape(system_profile.get('auth_mode', 'none'))}.
+          Upload limit: {html.escape(str(system_profile.get("upload_limit_mb", 64)))} MB.
+          Auth mode: {html.escape(system_profile.get("auth_mode", "none"))}.
         </p>
         {warning_html}
       </div>
       <div class="studio-mini-grid">
         <div class="studio-mini">
           <strong>Surface</strong>
-          <span>{'Public' if system_profile.get('public_surface') else 'Loopback only'}</span>
+          <span>{"Public" if system_profile.get("public_surface") else "Loopback only"}</span>
         </div>
         <div class="studio-mini">
           <strong>Auth</strong>
-          <span>{'Enabled' if system_profile.get('auth_enabled') else 'Disabled'}</span>
+          <span>{"Enabled" if system_profile.get("auth_enabled") else "Disabled"}</span>
         </div>
         <div class="studio-mini">
           <strong>Upload cap</strong>
-          <span>{html.escape(str(system_profile.get('upload_limit_mb', 64)))} MB</span>
+          <span>{html.escape(str(system_profile.get("upload_limit_mb", 64)))} MB</span>
         </div>
         {public_url_html}
       </div>
@@ -827,7 +828,15 @@ def _diagnostic_reference_rows(items: list[dict]) -> list[list[object]]:
     rows = []
     for item in items:
         quality = reference_quality_breakdown(item.get("analysis") or {})
-        rows.append([item["id"], item["name"], f"{quality['score']:.1f}", quality["rating"], " / ".join((quality["strengths"] or quality["issues"])[:2])])
+        rows.append(
+            [
+                item["id"],
+                item["name"],
+                f"{quality['score']:.1f}",
+                quality["rating"],
+                " / ".join((quality["strengths"] or quality["issues"])[:2]),
+            ]
+        )
     rows.sort(key=lambda row: (-float(row[2]), str(row[1]).lower(), int(row[0])))
     return rows
 
@@ -971,7 +980,7 @@ def _discover_trained_payload(system_profile: dict, checkpoint_choices: list[tup
         </div>
         <div class="studio-stat">
           <span class="studio-stat-label">Long-form sample</span>
-          <span class="studio-stat-value">{'Ready' if longform_audio else 'Missing'}</span>
+          <span class="studio-stat-value">{"Ready" if longform_audio else "Missing"}</span>
         </div>
       </div>
     </section>
@@ -1044,7 +1053,9 @@ def create_studio_app():
         voice_profile_optional_choices = _voice_profile_choice_pairs(voice_profiles, include_none=True)
         source_choices = _choice_pairs(sources, label_key="label")
         asset_choices = _choice_pairs(assets, label_key="label")
-        job_choices = [(f"{job['id']} · {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}]
+        job_choices = [
+            (f"{job['id']} · {job['name']}", int(job["id"])) for job in jobs if job["status"] in {"queued", "running"}
+        ]
         checkpoint_choices = _checkpoint_choice_pairs(service.list_checkpoint_candidates())
         voice_model_choices = _voice_model_choices(system_profile, checkpoint_choices)
         trained_payload = _discover_trained_payload(system_profile, checkpoint_choices)
@@ -1058,7 +1069,9 @@ def create_studio_app():
             "selected_project_id": selected_project_id,
             "project_overview": _project_overview_html(project_detail, system_profile),
             "reference_choices": reference_choices,
-            "reference_value": (recommended_references[0]["id"] if recommended_references else _dropdown_value(reference_choices)),
+            "reference_value": (
+                recommended_references[0]["id"] if recommended_references else _dropdown_value(reference_choices)
+            ),
             "style_choices": style_choices,
             "style_value": 0,
             "voice_profile_choices": voice_profile_choices,
@@ -1221,7 +1234,9 @@ def create_studio_app():
         if not style_audio:
             raise gr.Error("Upload or record a style prompt first.")
         staged = service.stage_upload(style_audio)
-        saved, analysis = service.ingest_style(project_id, name or "Style Prompt", staged, style_text, context_notes, gen_text)
+        saved, analysis = service.ingest_style(
+            project_id, name or "Style Prompt", staged, style_text, context_notes, gen_text
+        )
         refresh = project_updates(project_id)
         summary = (
             f"Saved style #{saved['id']}.\n"
@@ -1244,7 +1259,12 @@ def create_studio_app():
             f"Alignment backend: {metadata['alignment_backend']}\n"
             f"Warnings: {', '.join(metadata['warnings']) if metadata['warnings'] else 'None'}"
         )
-        return metadata["transcript"], summary, json.dumps(metadata["alignment"][:48], indent=2) + ("\n..." if len(metadata["alignment"]) > 48 else ""), *refresh
+        return (
+            metadata["transcript"],
+            summary,
+            json.dumps(metadata["alignment"][:48], indent=2) + ("\n..." if len(metadata["alignment"]) > 48 else ""),
+            *refresh,
+        )
 
     def load_voice_profile_editor(project_id: int, profile_id: int | None):
         if not project_id:
@@ -1252,7 +1272,11 @@ def create_studio_app():
         if not profile_id:
             return "", "", []
         profile = service.get_voice_profile(int(profile_id))
-        return profile["name"], profile.get("description", ""), [int(reference_id) for reference_id in profile.get("member_ids", [])]
+        return (
+            profile["name"],
+            profile.get("description", ""),
+            [int(reference_id) for reference_id in profile.get("member_ids", [])],
+        )
 
     def save_voice_profile_editor(
         project_id: int,
@@ -1282,7 +1306,9 @@ def create_studio_app():
         refresh[11] = gr.update(choices=editor_choices, value=int(saved["id"]))
         refresh[12] = gr.update(value=saved["name"])
         refresh[13] = gr.update(value=saved.get("description", ""))
-        refresh[14] = gr.update(choices=_choice_pairs(service.list_references(int(project_id))), value=saved.get("member_ids", []))
+        refresh[14] = gr.update(
+            choices=_choice_pairs(service.list_references(int(project_id))), value=saved.get("member_ids", [])
+        )
         refresh[15] = gr.update(choices=profile_choices, value=int(saved["id"]))
         summary = (
             f"Saved voice profile #{saved['id']}.\n"
@@ -1650,7 +1676,13 @@ def create_studio_app():
             f"Edited phrase: {result['plan']['target_text']} -> {result['plan']['replacement_text'] or '[deleted]'}\n"
             f"Output length: {format_duration(result['duration_seconds'])}"
         )
-        return result["audio_path"], result.get("spectrogram_path"), json.dumps(result["plan"], indent=2), status, *refresh
+        return (
+            result["audio_path"],
+            result.get("spectrogram_path"),
+            json.dumps(result["plan"], indent=2),
+            status,
+            *refresh,
+        )
 
     def render_edit_preview(*args):
         return render_edit_now(*args[:8], "preview", *args[8:])
@@ -1905,7 +1937,11 @@ def create_studio_app():
                         interactive=True,
                     )
                     project_name = gr.Textbox(label="New project name", placeholder="Narrative Audio")
-                    project_description = gr.Textbox(label="Description", lines=3, placeholder="Client delivery pack, in-house narration, character study...")
+                    project_description = gr.Textbox(
+                        label="Description",
+                        lines=3,
+                        placeholder="Client delivery pack, in-house narration, character study...",
+                    )
                     with gr.Row():
                         create_project_btn = gr.Button("Create project", elem_classes=["studio-secondary"])
                         refresh_btn = gr.Button("Refresh", elem_classes=["studio-secondary"])
@@ -1927,13 +1963,19 @@ def create_studio_app():
                         with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Identity")
                             reference_name = gr.Textbox(label="Reference name", value="Lead Voice")
-                            reference_audio = gr.Audio(label="Reference audio", type="filepath", sources=["upload", "microphone"])
-                            reference_text = gr.Textbox(label="Reference transcript", lines=4, placeholder="Leave blank to transcribe locally.")
+                            reference_audio = gr.Audio(
+                                label="Reference audio", type="filepath", sources=["upload", "microphone"]
+                            )
+                            reference_text = gr.Textbox(
+                                label="Reference transcript", lines=4, placeholder="Leave blank to transcribe locally."
+                            )
                             reference_consent = gr.Checkbox(
                                 label="I have the right to use this voice sample",
                                 value=False,
                             )
-                            save_reference_btn = gr.Button("Analyze and save reference", elem_classes=["studio-secondary"])
+                            save_reference_btn = gr.Button(
+                                "Analyze and save reference", elem_classes=["studio-secondary"]
+                            )
                             reference_status = gr.Textbox(label="Reference status", lines=5, interactive=False)
                             reference_choice = gr.Dropdown(
                                 label="Saved reference",
@@ -1942,8 +1984,12 @@ def create_studio_app():
                             )
                             gr.Markdown("### Delivery prompt")
                             style_name = gr.Textbox(label="Style name", value="Calm Narrator")
-                            style_audio = gr.Audio(label="Style prompt audio", type="filepath", sources=["upload", "microphone"])
-                            style_text = gr.Textbox(label="Style transcript", lines=3, placeholder="Leave blank to transcribe locally.")
+                            style_audio = gr.Audio(
+                                label="Style prompt audio", type="filepath", sources=["upload", "microphone"]
+                            )
+                            style_text = gr.Textbox(
+                                label="Style transcript", lines=3, placeholder="Leave blank to transcribe locally."
+                            )
                             context_notes = gr.Textbox(
                                 label="Delivery context",
                                 lines=3,
@@ -1959,14 +2005,18 @@ def create_studio_app():
 
                         with gr.Column(scale=5, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Script workspace")
-                            preset_choice = gr.Dropdown(label="Starter preset", choices=list(SCRIPT_PRESETS.keys()), value="Product demo")
+                            preset_choice = gr.Dropdown(
+                                label="Starter preset", choices=list(SCRIPT_PRESETS.keys()), value="Product demo"
+                            )
                             load_preset_btn = gr.Button("Load preset", elem_classes=["studio-secondary"])
                             render_name = gr.Textbox(label="Take name", value="Final Render")
                             render_text = gr.Textbox(label="Script", lines=14, value=SCRIPT_PRESETS["Product demo"])
                             use_style_prompt = gr.Checkbox(label="Use saved style prompt during generation", value=True)
                             render_mode = gr.Radio(label="Render mode", choices=["preview", "final"], value="final")
                             with gr.Accordion("Advanced controls", open=False):
-                                speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
+                                speed = gr.Slider(
+                                    label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0
+                                )
                                 nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
                                 seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
                                 remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
@@ -1984,7 +2034,9 @@ def create_studio_app():
 
                         with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
                             runtime_snapshot = gr.HTML(value=initial_state["runtime_snapshot"])
-                            output_audio = gr.Audio(label="Latest output", type="filepath", elem_classes=["studio-audio-card"])
+                            output_audio = gr.Audio(
+                                label="Latest output", type="filepath", elem_classes=["studio-audio-card"]
+                            )
                             output_spectrogram = gr.Image(label="Spectrogram")
 
                 with gr.Tab("Edit"):
@@ -1999,13 +2051,17 @@ def create_studio_app():
                         with gr.Column(scale=4, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Editable source")
                             edit_source_name = gr.Textbox(label="Source name", value="Editable Source")
-                            edit_source_audio = gr.Audio(label="Source audio", type="filepath", sources=["upload", "microphone"])
+                            edit_source_audio = gr.Audio(
+                                label="Source audio", type="filepath", sources=["upload", "microphone"]
+                            )
                             edit_source_text = gr.Textbox(
                                 label="Confirmed transcript",
                                 lines=6,
                                 placeholder="Paste the exact transcript when you know it. Leave blank only when you need local alignment help.",
                             )
-                            save_edit_source_btn = gr.Button("Analyze and save source", elem_classes=["studio-secondary"])
+                            save_edit_source_btn = gr.Button(
+                                "Analyze and save source", elem_classes=["studio-secondary"]
+                            )
                             edit_source_status = gr.Textbox(label="Source status", lines=6, interactive=False)
                             edit_source_choice = gr.Dropdown(
                                 label="Saved editable source",
@@ -2053,7 +2109,9 @@ def create_studio_app():
                         with gr.Column(scale=3, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Alignment and result")
                             edit_alignment_preview = gr.Code(label="Word alignment preview", language="json")
-                            edit_output_audio = gr.Audio(label="Edited output", type="filepath", elem_classes=["studio-audio-card"])
+                            edit_output_audio = gr.Audio(
+                                label="Edited output", type="filepath", elem_classes=["studio-audio-card"]
+                            )
                             edit_output_spectrogram = gr.Image(label="Spectrogram")
                             edit_plan_preview = gr.Code(label="Resolved edit plan", language="json")
 
@@ -2115,7 +2173,9 @@ def create_studio_app():
                                     choices=initial_state["profile_editor_choices"],
                                     value=initial_state["profile_editor_value"],
                                 )
-                                profile_editor_name = gr.Textbox(label="Profile name", value=initial_state["profile_editor_name"])
+                                profile_editor_name = gr.Textbox(
+                                    label="Profile name", value=initial_state["profile_editor_name"]
+                                )
                                 profile_editor_description = gr.Textbox(
                                     label="Profile notes",
                                     lines=3,
@@ -2149,7 +2209,9 @@ def create_studio_app():
                                 value=SCRIPT_PRESETS["Product demo"],
                             )
                             with gr.Accordion("Advanced controls", open=False):
-                                voice_speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
+                                voice_speed = gr.Slider(
+                                    label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0
+                                )
                                 voice_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
                                 voice_seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
                                 voice_remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
@@ -2193,8 +2255,12 @@ def create_studio_app():
                                 value=initial_state["current_use_ema"],
                             )
                             with gr.Row():
-                                trained_detect_checkpoint_btn = gr.Button("Detect latest checkpoint", elem_classes=["studio-secondary"])
-                                trained_apply_btn = gr.Button("Use selected checkpoint", elem_classes=["studio-primary"])
+                                trained_detect_checkpoint_btn = gr.Button(
+                                    "Detect latest checkpoint", elem_classes=["studio-secondary"]
+                                )
+                                trained_apply_btn = gr.Button(
+                                    "Use selected checkpoint", elem_classes=["studio-primary"]
+                                )
                             trained_base_btn = gr.Button("Switch back to base model", elem_classes=["studio-secondary"])
                             trained_page_status = gr.Textbox(
                                 label="Trained voice status",
@@ -2292,8 +2358,12 @@ def create_studio_app():
                                 value=SCRIPT_PRESETS["Podcast intro"],
                             )
                             with gr.Accordion("Advanced controls", open=False):
-                                trained_speed = gr.Slider(label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0)
-                                trained_nfe_step = gr.Slider(label="NFE override", minimum=0, maximum=64, step=2, value=0)
+                                trained_speed = gr.Slider(
+                                    label="Speed override", minimum=0.0, maximum=1.5, step=0.05, value=0.0
+                                )
+                                trained_nfe_step = gr.Slider(
+                                    label="NFE override", minimum=0, maximum=64, step=2, value=0
+                                )
                                 trained_seed = gr.Number(label="Seed lock (0 = random)", value=0, precision=0)
                                 trained_remove_silence = gr.Checkbox(label="Trim long silence in output", value=False)
                                 trained_render_spectrogram = gr.Checkbox(label="Render spectrogram", value=False)
@@ -2374,10 +2444,20 @@ def create_studio_app():
                     with gr.Row():
                         with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### A/B compare")
-                            take_a = gr.Dropdown(label="Take A", choices=initial_state["asset_choices"], value=initial_state["take_a_value"])
-                            take_b = gr.Dropdown(label="Take B", choices=initial_state["asset_choices"], value=initial_state["take_b_value"])
+                            take_a = gr.Dropdown(
+                                label="Take A",
+                                choices=initial_state["asset_choices"],
+                                value=initial_state["take_a_value"],
+                            )
+                            take_b = gr.Dropdown(
+                                label="Take B",
+                                choices=initial_state["asset_choices"],
+                                value=initial_state["take_b_value"],
+                            )
                             compare_btn = gr.Button("Load comparison", elem_classes=["studio-secondary"])
-                            compare_audio_a = gr.Audio(label="Take A audio", type="filepath", elem_classes=["studio-audio-card"])
+                            compare_audio_a = gr.Audio(
+                                label="Take A audio", type="filepath", elem_classes=["studio-audio-card"]
+                            )
                             compare_meta_a = gr.Code(label="Take A metadata", language="json")
                         with gr.Column(scale=6, elem_classes=["studio-panel", "studio-stack"]):
                             gr.Markdown("### Export")
@@ -2389,7 +2469,9 @@ def create_studio_app():
                             export_btn = gr.Button("Create share bundle", elem_classes=["studio-secondary"])
                             export_status = gr.Textbox(label="Export status", interactive=False)
                             export_file = gr.File(label="Bundle index", interactive=False)
-                            compare_audio_b = gr.Audio(label="Take B audio", type="filepath", elem_classes=["studio-audio-card"])
+                            compare_audio_b = gr.Audio(
+                                label="Take B audio", type="filepath", elem_classes=["studio-audio-card"]
+                            )
                             compare_meta_b = gr.Code(label="Take B metadata", language="json")
 
                 with gr.Tab("Diagnostics"):
@@ -2509,7 +2591,11 @@ def create_studio_app():
                             )
                             asr_backend = gr.Dropdown(
                                 label="ASR backend",
-                                choices=[("Auto", "auto"), ("MLX Whisper", "mlx_whisper"), ("Transformers Whisper", "transformers")],
+                                choices=[
+                                    ("Auto", "auto"),
+                                    ("MLX Whisper", "mlx_whisper"),
+                                    ("Transformers Whisper", "transformers"),
+                                ],
                                 value=service.get_asr_backend(),
                             )
                             idle_unload_seconds = gr.Number(
@@ -2525,7 +2611,9 @@ def create_studio_app():
                             )
                             use_ema = gr.Checkbox(label="Use EMA weights", value=initial_state["current_use_ema"])
                             with gr.Row():
-                                detect_checkpoint_btn = gr.Button("Detect latest checkpoint", elem_classes=["studio-secondary"])
+                                detect_checkpoint_btn = gr.Button(
+                                    "Detect latest checkpoint", elem_classes=["studio-secondary"]
+                                )
                                 warm_engine_btn = gr.Button("Warm engine now", elem_classes=["studio-secondary"])
                                 save_settings_btn = gr.Button("Save runtime settings", elem_classes=["studio-primary"])
                             settings_status = gr.Textbox(label="Settings status", interactive=False)
@@ -2658,7 +2746,13 @@ def create_studio_app():
 
             profile_save_btn.click(
                 save_voice_profile_editor,
-                inputs=[active_project, profile_editor_choice, profile_editor_name, profile_editor_description, profile_editor_members],
+                inputs=[
+                    active_project,
+                    profile_editor_choice,
+                    profile_editor_name,
+                    profile_editor_description,
+                    profile_editor_members,
+                ],
                 outputs=[profile_status] + refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
@@ -2839,7 +2933,8 @@ def create_studio_app():
                     trained_render_spectrogram,
                     trained_seed,
                 ],
-                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + render_refresh_outputs,
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status]
+                + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2864,7 +2959,8 @@ def create_studio_app():
                     trained_render_spectrogram,
                     trained_seed,
                 ],
-                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status] + render_refresh_outputs,
+                outputs=[trained_render_audio, trained_render_spectrogram_image, trained_render_status]
+                + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2883,7 +2979,8 @@ def create_studio_app():
                     edit_nfe_step,
                     edit_render_spectrogram,
                 ],
-                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + render_refresh_outputs,
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status]
+                + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2902,7 +2999,8 @@ def create_studio_app():
                     edit_nfe_step,
                     edit_render_spectrogram,
                 ],
-                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status] + render_refresh_outputs,
+                outputs=[edit_output_audio, edit_output_spectrogram, edit_plan_preview, edit_status]
+                + render_refresh_outputs,
                 concurrency_limit=1,
                 concurrency_id="studio_compute",
             )
@@ -2917,7 +3015,15 @@ def create_studio_app():
 
             batch_submit_btn.click(
                 submit_batch,
-                inputs=[active_project, batch_reference, batch_style, batch_mode, batch_use_style, batch_context, batch_scripts],
+                inputs=[
+                    active_project,
+                    batch_reference,
+                    batch_style,
+                    batch_mode,
+                    batch_use_style,
+                    batch_context,
+                    batch_scripts,
+                ],
                 outputs=[batch_status] + render_refresh_outputs,
             )
 
@@ -2937,7 +3043,15 @@ def create_studio_app():
 
             save_settings_btn.click(
                 save_settings,
-                inputs=[active_project, profile_choice, inference_backend, asr_backend, idle_unload_seconds, checkpoint_path, use_ema],
+                inputs=[
+                    active_project,
+                    profile_choice,
+                    inference_backend,
+                    asr_backend,
+                    idle_unload_seconds,
+                    checkpoint_path,
+                    use_ema,
+                ],
                 outputs=refresh_outputs + [settings_status, trained_page_status],
             )
 

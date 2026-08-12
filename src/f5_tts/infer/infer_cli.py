@@ -18,18 +18,36 @@ from unidecode import unidecode
 
 from f5_tts.infer.utils_infer import (
     cfg_strength as default_cfg_strength,
+)
+from f5_tts.infer.utils_infer import (
     cross_fade_duration as default_cross_fade_duration,
+)
+from f5_tts.infer.utils_infer import (
     device as default_device,
+)
+from f5_tts.infer.utils_infer import (
     fix_duration as default_fix_duration,
+)
+from f5_tts.infer.utils_infer import (
     infer_process,
     load_model,
     load_vocoder,
-    mel_spec_type as default_mel_spec_type,
-    nfe_step as default_nfe_step,
     preprocess_ref_audio_text,
     remove_silence_for_generated_wav,
+)
+from f5_tts.infer.utils_infer import (
+    mel_spec_type as default_mel_spec_type,
+)
+from f5_tts.infer.utils_infer import (
+    nfe_step as default_nfe_step,
+)
+from f5_tts.infer.utils_infer import (
     speed as default_speed,
+)
+from f5_tts.infer.utils_infer import (
     sway_sampling_coef as default_sway_sampling_coef,
+)
+from f5_tts.infer.utils_infer import (
     target_rms as default_target_rms,
 )
 
@@ -47,9 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.path.join(files("f5_tts").joinpath("infer/examples/basic"), "basic.toml"),
         help="The configuration file, default see infer/examples/basic/basic.toml",
     )
-    parser.add_argument("-m", "--model", type=str, help="The model name: F5TTS_v1_Base | F5TTS_Base | E2TTS_Base | etc.")
+    parser.add_argument(
+        "-m", "--model", type=str, help="The model name: F5TTS_v1_Base | F5TTS_Base | E2TTS_Base | etc."
+    )
     parser.add_argument("-mc", "--model_cfg", type=str, help="The path to F5-TTS model config file .yaml")
-    parser.add_argument("-p", "--ckpt_file", type=str, help="The path to model checkpoint .pt, leave blank to use default")
+    parser.add_argument(
+        "-p", "--ckpt_file", type=str, help="The path to model checkpoint .pt, leave blank to use default"
+    )
     parser.add_argument("-v", "--vocab_file", type=str, help="The path to vocab file .txt, leave blank to use default")
     parser.add_argument("-r", "--ref_audio", type=str, help="The reference audio file.")
     parser.add_argument("-s", "--ref_text", type=str, help="The transcript/subtitle for the reference audio")
@@ -86,7 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Duration of cross-fade between audio segments in seconds, default {default_cross_fade_duration}",
     )
     parser.add_argument("--nfe_step", type=int, help=f"The number of denoising steps, default {default_nfe_step}")
-    parser.add_argument("--cfg_strength", type=float, help=f"Classifier-free guidance strength, default {default_cfg_strength}")
+    parser.add_argument(
+        "--cfg_strength", type=float, help=f"Classifier-free guidance strength, default {default_cfg_strength}"
+    )
     parser.add_argument(
         "--sway_sampling_coef",
         type=float,
@@ -136,9 +160,7 @@ def _prepare_model(
         device=device,
     )
 
-    model_cfg = OmegaConf.load(
-        model_cfg_path or str(files("f5_tts").joinpath(f"configs/{model}.yaml"))
-    )
+    model_cfg = OmegaConf.load(model_cfg_path or str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
 
@@ -185,7 +207,9 @@ def main():
     ckpt_file = args.ckpt_file or config.get("ckpt_file", "")
     vocab_file = args.vocab_file or config.get("vocab_file", "")
 
-    ref_audio = _resolve_example_path(args.ref_audio or config.get("ref_audio", "infer/examples/basic/basic_ref_en.wav"))
+    ref_audio = _resolve_example_path(
+        args.ref_audio or config.get("ref_audio", "infer/examples/basic/basic_ref_en.wav")
+    )
     ref_text = (
         args.ref_text
         if args.ref_text is not None

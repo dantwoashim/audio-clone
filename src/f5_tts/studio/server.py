@@ -11,7 +11,13 @@ from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from f5_tts.infer.utils_infer import tempfile_kwargs
 from f5_tts.studio.runtime import get_service
-from f5_tts.studio.schemas import EditRenderRequest, GenerationRequest, ProjectCreate, PronunciationRuleCreate, VoiceProfileCreate
+from f5_tts.studio.schemas import (
+    EditRenderRequest,
+    GenerationRequest,
+    ProjectCreate,
+    PronunciationRuleCreate,
+    VoiceProfileCreate,
+)
 from f5_tts.studio.security import (
     ensure_upload_within_limit,
     get_security_settings,
@@ -225,6 +231,7 @@ def create_server_app(mount_studio: bool = True, service=None) -> FastAPI:
         )
 
     return app
+
 
 @click.command()
 @click.option("--port", "-p", default=7862, type=int, help="Port to run the FastAPI + Gradio server on")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -125,7 +124,9 @@ def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float | None:
     return float(np.dot(left, right) / (left_norm * right_norm))
 
 
-def voice_similarity_proxy(reference_audio_path: str, candidate_audio_path: str, target_sample_rate: int = 24000) -> float | None:
+def voice_similarity_proxy(
+    reference_audio_path: str, candidate_audio_path: str, target_sample_rate: int = 24000
+) -> float | None:
     try:
         reference_audio, _ = _load_mono_audio(reference_audio_path, target_sample_rate=target_sample_rate)
         candidate_audio, _ = _load_mono_audio(candidate_audio_path, target_sample_rate=target_sample_rate)

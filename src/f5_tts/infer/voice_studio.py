@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import click
 import os
+
+import click
 
 from f5_tts.studio.runtime import get_service
 from f5_tts.studio.security import get_security_settings, verify_token
@@ -34,6 +35,7 @@ def main(port, host, share, inbrowser):
 
     auth_dependency = None
     if settings.token_auth_enabled and not settings.basic_auth_enabled:
+
         def auth_dependency(request):
             token = request.headers.get("x-f5-tts-token") or request.query_params.get("access_token")
             if verify_token(token, settings):

@@ -1,5 +1,4 @@
 import random
-import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
