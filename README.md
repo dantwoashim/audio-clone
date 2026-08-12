@@ -6,6 +6,23 @@
 
 Audio Clone Studio is a local-first voice cloning and speech production workspace built on top of the F5-TTS stack. It combines fast reference-based synthesis, project-aware asset management, trained voice checkpoints, reusable voice profiles, batch rendering, aligned speech editing, diagnostics, and a polished browser studio in one repository.
 
+[Quick start](#quick-start) |
+[Studio workflow](#studio-workflow) |
+[Development](#development-commands) |
+[F5-TTS upstream](https://github.com/SWivid/F5-TTS)
+
+## Project status and attribution
+
+This is my experimental product layer around the open-source F5-TTS codebase,
+not an independently trained speech model. The package name, model code, and
+core inference entry points remain those of F5-TTS. My work in this repository
+focuses on the local studio, project and asset organization, voice profiles,
+editing workflows, diagnostics, service access, and cross-platform operation.
+
+F5-TTS is credited in the package metadata and remains the upstream reference
+for the model architecture and original research. NVIDIA BigVGAN is included
+as a pinned Git submodule for supported vocoder paths.
+
 This repository is designed for practical production work:
 
 - clone and render from curated reference clips
@@ -276,3 +293,15 @@ For a deeper walkthrough of inference usage, examples, and editing tools, see:
 
 - [Inference Guide](src/f5_tts/infer/README.md)
 - [Runtime Deployment Notes](src/f5_tts/runtime/triton_trtllm/README.md)
+
+## Responsible use
+
+Use voices only with the speaker's informed permission. Generated audio should
+be disclosed wherever a listener could reasonably mistake it for an authentic
+recording. Local processing reduces data exposure; it does not remove the
+legal or ethical responsibility attached to a cloned voice.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE) and retain upstream notices when redistributing
+the model code or derivative builds.
